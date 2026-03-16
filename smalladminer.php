@@ -25,7 +25,6 @@ header('Referrer-Policy: no-referrer');
 header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
 header("Cross-Origin-Opener-Policy: same-origin");
 header("Cross-Origin-Resource-Policy: same-origin");
-// CSP kept permissive because you load Bootstrap/FA from CDN. Tighten if you self-host.
 header("Content-Security-Policy: default-src 'self' https: data:; script-src 'self' https: 'unsafe-inline'; style-src 'self' https: 'unsafe-inline'; img-src 'self' https: data:;");
 
 // -----------------------------
@@ -525,6 +524,68 @@ function run_multi_sql(mysqli $conn, string $sqlInput, bool $showAll, int $limit
     'results' => $results,
     'statement_count' => count($statements)
   ];
+}
+
+function get_table_row_count(mysqli $conn, string $table): int {
+  $sql = "SELECT COUNT(*) AS c FROM `" . str_replace('`', '``', $table) . "`";
+  $res = $conn->query($sql);
+  if ($res) {
+    $row = $res->fetch_assoc();
+    $res->free();
+    return (int)($row['c'] ?? 0);
+  }
+  return 0;
+}
+
+function get_tables_with_row_counts(mysqli $conn): array {
+  $tables = list_tables($conn);
+  $out = [];
+  foreach ($tables as $tbl) {
+    $out[] = [
+      'name' => $tbl,
+      'rows' => get_table_row_count($conn, $tbl)
+    ];
+  }
+  return $out;
+}
+
+function build_browse_url(array $params): string {
+  return $_SERVER['PHP_SELF'] . '?' . http_build_query($params);
+}
+
+function make_browse_params(
+  string $table,
+  bool $s_enabled,
+  string $s_field,
+  string $s_mode,
+  string $s_term,
+  bool $s_cs,
+  bool $browse_desc,
+  string $pageLength,
+  int $page
+): array {
+  $params = [
+    'action' => 'browse',
+    'table' => $table,
+    'page_length' => $pageLength,
+    'page' => $page
+  ];
+
+  if ($s_enabled) {
+    $params['s_enabled'] = 1;
+    $params['s_field'] = $s_field;
+    $params['s_mode'] = $s_mode;
+    $params['s_term'] = $s_term;
+    if ($s_cs) {
+      $params['s_cs'] = 1;
+    }
+  }
+
+  if ($browse_desc) {
+    $params['browse_desc'] = 1;
+  }
+
+  return $params;
 }
 
 // ---------------------------------------------------------------------
@@ -1322,7 +1383,7 @@ if ($conn) {
   }
 
   if ($action === 'tables') {
-    $tables = list_tables($conn);
+    $tablesWithCounts = get_tables_with_row_counts($conn);
     ?>
     <div class="card shadow-sm">
       <div class="card-header d-flex justify-content-between align-items-center">
@@ -1338,11 +1399,14 @@ if ($conn) {
       </div>
       <div class="card-body">
         <div class="list-group">
-          <?php foreach ($tables as $tbl): ?>
-            <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($tbl)); ?>"
+          <?php foreach ($tablesWithCounts as $item): ?>
+            <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($item['name'])); ?>"
                class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
-              <span><i class="fa-regular fa-square"></i> <?php echo h($tbl); ?></span>
-              <span class="badge bg-secondary rounded-pill">Browse</span>
+              <span><i class="fa-regular fa-square"></i> <?php echo h($item['name']); ?></span>
+              <span>
+                <span class="badge bg-secondary rounded-pill me-2"><?php echo number_format((int)$item['rows']); ?> rows</span>
+                <span class="badge bg-secondary rounded-pill">Browse</span>
+              </span>
             </a>
           <?php endforeach; ?>
         </div>
@@ -1367,8 +1431,21 @@ if ($conn) {
       $s_mode = (string)($_GET['s_mode'] ?? 'like');
       $s_term = (string)($_GET['s_term'] ?? '');
       $s_cs = !empty($_GET['s_cs']);
-      $show_all = !empty($_GET['show_all']);
       $browse_desc = !empty($_GET['browse_desc']);
+
+      $allowedPageLengths = ['10', '25', '50', '100', 'all'];
+      $pageLength = (string)($_GET['page_length'] ?? '50');
+      if (!in_array($pageLength, $allowedPageLengths, true)) {
+        $pageLength = '50';
+      }
+
+      $page = (int)($_GET['page'] ?? 1);
+      if ($page < 1) {
+        $page = 1;
+      }
+
+      $showAllRecords = ($pageLength === 'all');
+      $perPage = $showAllRecords ? 0 : (int)$pageLength;
 
       $hasWhere = false;
       $whereSql = '';
@@ -1384,7 +1461,8 @@ if ($conn) {
         $sqlCount = "SELECT COUNT(*) AS c FROM `" . str_replace('`', '``', $table) . "` WHERE $whereSql";
         $stmt = $conn->prepare($sqlCount);
         if ($stmt) {
-          stmt_bind_all_strings($stmt, $params);
+          $paramsCount = $params;
+          stmt_bind_all_strings($stmt, $paramsCount);
           $stmt->execute();
           $stmt->bind_result($c);
           if ($stmt->fetch()) {
@@ -1401,9 +1479,14 @@ if ($conn) {
         }
       }
 
-      $limit = 50;
+      $totalPages = $showAllRecords ? 1 : max(1, (int)ceil($count / max(1, $perPage)));
+      if ($page > $totalPages) {
+        $page = $totalPages;
+      }
+
+      $offset = $showAllRecords ? 0 : (($page - 1) * $perPage);
+
       $rows = [];
-      $hasMore = false;
       $autoIncrementField = get_auto_increment_column($conn, $table);
 
       $sql = "SELECT * FROM `" . str_replace('`', '``', $table) . "`";
@@ -1415,8 +1498,8 @@ if ($conn) {
         $sql .= " ORDER BY `" . str_replace('`', '``', $autoIncrementField) . "` DESC";
       }
 
-      if (!$show_all) {
-        $sql .= " LIMIT " . (int)($limit + 1);
+      if (!$showAllRecords) {
+        $sql .= " LIMIT " . (int)$perPage . " OFFSET " . (int)$offset;
       }
 
       if ($hasWhere) {
@@ -1437,13 +1520,8 @@ if ($conn) {
             $meta->free();
           }
 
-          $rows = stmt_fetch_all_assoc($stmt, $fieldNames, $show_all ? 0 : ($limit + 1));
+          $rows = stmt_fetch_all_assoc($stmt, $fieldNames, 0);
           $stmt->close();
-
-          if (!$show_all && count($rows) > $limit) {
-            $hasMore = true;
-            array_pop($rows);
-          }
         } else {
           $fields = [];
         }
@@ -1456,54 +1534,31 @@ if ($conn) {
             $rows[] = $r;
           }
           $res->free();
-          if (!$show_all && count($rows) > $limit) {
-            $hasMore = true;
-            array_pop($rows);
-          }
         }
       }
 
       $pk = get_primary_key($conn, $table);
 
-      $paramsUrl = ['action' => 'browse', 'table' => $table];
-      if ($s_enabled) {
-        $paramsUrl['s_enabled'] = 1;
-        $paramsUrl['s_field'] = $s_field;
-        $paramsUrl['s_mode'] = $s_mode;
-        $paramsUrl['s_term'] = $s_term;
-        if ($s_cs) {
-          $paramsUrl['s_cs'] = 1;
-        }
-      }
-      if ($browse_desc && $autoIncrementField !== null) {
-        $paramsUrl['browse_desc'] = 1;
-      }
-      $paramsUrl['show_all'] = 1;
-      $showAllUrl = $_SERVER['PHP_SELF'] . '?' . http_build_query($paramsUrl);
+      $baseParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, $page);
 
-      $descParamsUrl = ['action' => 'browse', 'table' => $table, 'browse_desc' => 1];
-      if ($s_enabled) {
-        $descParamsUrl['s_enabled'] = 1;
-        $descParamsUrl['s_field'] = $s_field;
-        $descParamsUrl['s_mode'] = $s_mode;
-        $descParamsUrl['s_term'] = $s_term;
-        if ($s_cs) {
-          $descParamsUrl['s_cs'] = 1;
-        }
-      }
-      $browseDescUrl = $_SERVER['PHP_SELF'] . '?' . http_build_query($descParamsUrl);
+      $descParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, true, $pageLength, 1);
+      $browseDescUrl = build_browse_url($descParams);
 
-      $normalBrowseParams = ['action' => 'browse', 'table' => $table];
-      if ($s_enabled) {
-        $normalBrowseParams['s_enabled'] = 1;
-        $normalBrowseParams['s_field'] = $s_field;
-        $normalBrowseParams['s_mode'] = $s_mode;
-        $normalBrowseParams['s_term'] = $s_term;
-        if ($s_cs) {
-          $normalBrowseParams['s_cs'] = 1;
-        }
-      }
-      $normalBrowseUrl = $_SERVER['PHP_SELF'] . '?' . http_build_query($normalBrowseParams);
+      $normalParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, false, $pageLength, 1);
+      $normalBrowseUrl = build_browse_url($normalParams);
+
+      $firstPageParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, 1);
+      $prevPageParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, max(1, $page - 1));
+      $nextPageParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, min($totalPages, $page + 1));
+      $lastPageParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, $totalPages);
+
+      $firstPageUrl = build_browse_url($firstPageParams);
+      $prevPageUrl = build_browse_url($prevPageParams);
+      $nextPageUrl = build_browse_url($nextPageParams);
+      $lastPageUrl = build_browse_url($lastPageParams);
+
+      $startRow = $count > 0 ? ($showAllRecords ? 1 : ($offset + 1)) : 0;
+      $endRow = $count > 0 ? ($showAllRecords ? $count : min($offset + count($rows), $count)) : 0;
       ?>
       <div class="mb-3 d-flex gap-2 flex-wrap">
         <a href="<?php echo h($_SERVER['PHP_SELF']); ?>" class="btn btn-secondary btn-sm">
@@ -1521,7 +1576,7 @@ if ($conn) {
         </button>
         <?php if ($autoIncrementField !== null): ?>
           <a href="<?php echo h($browseDescUrl); ?>" class="btn btn-outline-dark btn-sm">
-            <i class="fa-solid fa-sort-down"></i> Browse last 50 records desc
+            <i class="fa-solid fa-sort-down"></i> Browse last records desc
           </a>
           <?php if ($browse_desc): ?>
             <a href="<?php echo h($normalBrowseUrl); ?>" class="btn btn-outline-secondary btn-sm">
@@ -1537,13 +1592,15 @@ if ($conn) {
         </div>
         <div class="card-body">
 
-          <form method="get" class="row g-2 align-items-end mb-3">
+          <form method="get" class="row g-2 align-items-end mb-3" id="browseFiltersForm">
             <input type="hidden" name="action" value="browse">
             <input type="hidden" name="table" value="<?php echo h($table); ?>">
             <input type="hidden" name="s_enabled" value="1">
-            <?php if ($browse_desc && $autoIncrementField !== null): ?>
+            <?php if ($browse_desc): ?>
               <input type="hidden" name="browse_desc" value="1">
             <?php endif; ?>
+            <input type="hidden" name="page" value="1">
+
             <div class="col-md-3">
               <label class="form-label small">Field</label>
               <select name="s_field" class="form-select form-select-sm">
@@ -1554,6 +1611,7 @@ if ($conn) {
                 <?php endforeach; ?>
               </select>
             </div>
+
             <div class="col-md-2">
               <label class="form-label small">Match</label>
               <select name="s_mode" class="form-select form-select-sm">
@@ -1564,21 +1622,36 @@ if ($conn) {
                 <option value="regexp" <?php echo $s_mode === 'regexp' ? 'selected' : ''; ?>>REGEXP</option>
               </select>
             </div>
-            <div class="col-md-4">
+
+            <div class="col-md-3">
               <label class="form-label small">Value</label>
               <input type="text" name="s_term" class="form-control form-control-sm" value="<?php echo h($s_term); ?>" placeholder="Search term">
             </div>
+
             <div class="col-md-2">
+              <label class="form-label small">Page length</label>
+              <select name="page_length" class="form-select form-select-sm js-page-length-select">
+                <?php foreach (['10', '25', '50', '100', 'all'] as $pl): ?>
+                  <option value="<?php echo h($pl); ?>" <?php echo $pageLength === $pl ? 'selected' : ''; ?>>
+                    <?php echo $pl === 'all' ? 'All' : h($pl); ?>
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </div>
+
+            <div class="col-md-1">
               <div class="form-check mt-4">
                 <input class="form-check-input" type="checkbox" name="s_cs" value="1" id="s_cs" <?php echo $s_cs ? 'checked' : ''; ?>>
-                <label class="form-check-label small" for="s_cs">Case sensitive</label>
+                <label class="form-check-label small" for="s_cs">CS</label>
               </div>
             </div>
+
             <div class="col-md-1">
               <button type="submit" class="btn btn-primary btn-sm w-100">
                 <i class="fa-solid fa-magnifying-glass"></i>
               </button>
             </div>
+
             <div class="col-12">
               <a class="btn btn-outline-secondary btn-sm"
                  href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($table)); ?>">
@@ -1593,25 +1666,62 @@ if ($conn) {
             </div>
           <?php endif; ?>
 
-          <?php if ($hasMore): ?>
-            <div class="alert alert-warning d-flex justify-content-between align-items-center">
-              <div>
-                Displaying the first <?php echo (int)$limit; ?> rows out of <?php echo (int)$count; ?> matching row(s).
-                Loading all results may be slow and could consume substantial memory.
-              </div>
-              <a class="btn btn-sm btn-outline-dark"
-                 href="<?php echo h($showAllUrl); ?>"
-                 onclick="return confirm('This may take a long time and could stress the server. Continue?');">
-                Show all
-              </a>
+          <?php if ($showAllRecords): ?>
+            <div class="alert alert-warning">
+              Showing all matching rows. This can be slow and memory intensive on large tables.
             </div>
-          <?php else: ?>
-            <div class="alert alert-success">
+          <?php endif; ?>
+
+          <div class="alert alert-success d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div>
               <?php if ($hasWhere): ?>
-                Matching rows: <?php echo (int)$count; ?>. Displayed: <?php echo count($rows); ?>.
+                Matching rows: <?php echo (int)$count; ?>.
               <?php else: ?>
-                Total rows: <?php echo (int)$count; ?>. Displayed: <?php echo count($rows); ?>.
+                Total rows: <?php echo (int)$count; ?>.
               <?php endif; ?>
+              Displayed: <?php echo count($rows); ?>.
+              <?php if ($count > 0): ?>
+                Range: <?php echo (int)$startRow; ?> - <?php echo (int)$endRow; ?>.
+              <?php endif; ?>
+            </div>
+            <div>
+              <?php if (!$showAllRecords): ?>
+                Page <?php echo (int)$page; ?> / <?php echo (int)$totalPages; ?>
+              <?php else: ?>
+                All rows
+              <?php endif; ?>
+            </div>
+          </div>
+
+          <?php if (!$showAllRecords && $totalPages > 1): ?>
+            <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+              <div class="btn-group" role="group">
+                <a class="btn btn-sm btn-outline-secondary <?php echo $page <= 1 ? 'disabled' : ''; ?>" href="<?php echo h($firstPageUrl); ?>">First</a>
+                <a class="btn btn-sm btn-outline-secondary <?php echo $page <= 1 ? 'disabled' : ''; ?>" href="<?php echo h($prevPageUrl); ?>">Prev</a>
+                <a class="btn btn-sm btn-outline-secondary <?php echo $page >= $totalPages ? 'disabled' : ''; ?>" href="<?php echo h($nextPageUrl); ?>">Next</a>
+                <a class="btn btn-sm btn-outline-secondary <?php echo $page >= $totalPages ? 'disabled' : ''; ?>" href="<?php echo h($lastPageUrl); ?>">Last</a>
+              </div>
+
+              <form method="get" class="d-flex align-items-center gap-2">
+                <input type="hidden" name="action" value="browse">
+                <input type="hidden" name="table" value="<?php echo h($table); ?>">
+                <?php if ($s_enabled): ?>
+                  <input type="hidden" name="s_enabled" value="1">
+                  <input type="hidden" name="s_field" value="<?php echo h($s_field); ?>">
+                  <input type="hidden" name="s_mode" value="<?php echo h($s_mode); ?>">
+                  <input type="hidden" name="s_term" value="<?php echo h($s_term); ?>">
+                  <?php if ($s_cs): ?>
+                    <input type="hidden" name="s_cs" value="1">
+                  <?php endif; ?>
+                <?php endif; ?>
+                <?php if ($browse_desc): ?>
+                  <input type="hidden" name="browse_desc" value="1">
+                <?php endif; ?>
+                <input type="hidden" name="page_length" value="<?php echo h($pageLength); ?>">
+                <label class="small mb-0">Page</label>
+                <input type="number" name="page" min="1" max="<?php echo (int)$totalPages; ?>" value="<?php echo (int)$page; ?>" class="form-control form-control-sm" style="width:90px;">
+                <button type="submit" class="btn btn-sm btn-outline-primary">Go</button>
+              </form>
             </div>
           <?php endif; ?>
 
@@ -1659,6 +1769,20 @@ if ($conn) {
                   <?php endforeach; ?>
                 </tbody>
               </table>
+            </div>
+          <?php endif; ?>
+
+          <?php if (!$showAllRecords && $totalPages > 1): ?>
+            <div class="d-flex justify-content-between align-items-center mt-3 flex-wrap gap-2">
+              <div class="btn-group" role="group">
+                <a class="btn btn-sm btn-outline-secondary <?php echo $page <= 1 ? 'disabled' : ''; ?>" href="<?php echo h($firstPageUrl); ?>">First</a>
+                <a class="btn btn-sm btn-outline-secondary <?php echo $page <= 1 ? 'disabled' : ''; ?>" href="<?php echo h($prevPageUrl); ?>">Prev</a>
+                <a class="btn btn-sm btn-outline-secondary <?php echo $page >= $totalPages ? 'disabled' : ''; ?>" href="<?php echo h($nextPageUrl); ?>">Next</a>
+                <a class="btn btn-sm btn-outline-secondary <?php echo $page >= $totalPages ? 'disabled' : ''; ?>" href="<?php echo h($lastPageUrl); ?>">Last</a>
+              </div>
+              <div class="small text-muted">
+                Page <?php echo (int)$page; ?> of <?php echo (int)$totalPages; ?>
+              </div>
             </div>
           <?php endif; ?>
 
@@ -2408,6 +2532,18 @@ document.addEventListener('click', function(e) {
   var type = b64ToUtf8(btn.dataset.typeB64 || '');
 
   toggleRename(table, field, type);
+});
+
+document.addEventListener('change', function(e) {
+  var sel = e.target.closest('.js-page-length-select');
+  if (!sel) {
+    return;
+  }
+  if (sel.value === 'all') {
+    if (!confirm('Showing all rows may be very slow and can use a lot of memory. Continue?')) {
+      sel.value = '50';
+    }
+  }
 });
 </script>
 
