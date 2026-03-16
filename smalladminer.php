@@ -36,7 +36,6 @@ ini_set('session.cookie_httponly', '1');
 if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
   ini_set('session.cookie_secure', '1');
 }
-// session.cookie_samesite may not be supported everywhere on PHP 7.2 builds; set if possible
 @ini_set('session.cookie_samesite', 'Strict');
 
 session_start();
@@ -57,14 +56,16 @@ function b64e($s): string {
 
 function redirect(array $params = []): void {
   $base = $_SERVER['PHP_SELF'];
-  if (!empty($params)) $base .= '?' . http_build_query($params);
+  if (!empty($params)) {
+    $base .= '?' . http_build_query($params);
+  }
   header("Location: " . $base);
   exit;
 }
 
 function set_flash(string $msg, bool $is_error = false): void {
   $_SESSION['flash_message'] = $msg;
-  $_SESSION['flash_error']   = $is_error ? 1 : 0;
+  $_SESSION['flash_error'] = $is_error ? 1 : 0;
 }
 
 function flash_get(): array {
@@ -101,13 +102,13 @@ function csrf_check(): void {
   }
 }
 
-// Parse ENUM/SET definition robustly (supports commas, escaped quotes)
 function parse_enum_set_values(string $typeDef): array {
   $values = [];
-  if (!preg_match("/^(enum|set)\((.+)\)$/i", trim($typeDef), $m)) return $values;
+  if (!preg_match("/^(enum|set)\((.+)\)$/i", trim($typeDef), $m)) {
+    return $values;
+  }
   $inner = $m[2];
 
-  // Match quoted items: '...'(with \' allowed) OR "..."(with \" allowed)
   if (preg_match_all("/'((?:\\\\'|[^'])*)'|\"((?:\\\\\"|[^\"])*)\"/u", $inner, $mm, PREG_SET_ORDER)) {
     foreach ($mm as $hit) {
       $v = $hit[1] !== '' ? $hit[1] : $hit[2];
@@ -115,12 +116,16 @@ function parse_enum_set_values(string $typeDef): array {
       $values[] = $v;
     }
   } else {
-    // Fallback: naive split
     $parts = explode(",", $inner);
     foreach ($parts as $p) {
       $p = trim($p);
-      if ($p === "''") { $values[] = ''; continue; }
-      if (strlen($p) >= 2 && ($p[0] === "'" || $p[0] === '"')) $p = substr($p, 1, -1);
+      if ($p === "''") {
+        $values[] = '';
+        continue;
+      }
+      if (strlen($p) >= 2 && ($p[0] === "'" || $p[0] === '"')) {
+        $p = substr($p, 1, -1);
+      }
       $p = str_replace(["\\'", '\\"', "\\\\"], ["'", '"', "\\"], $p);
       $values[] = $p;
     }
@@ -140,32 +145,34 @@ function is_resultset_sql(string $sql): bool {
   $s = preg_replace('/^\/\*.*?\*\//s', '', $s);
   $s = ltrim((string)$s);
   $kw = strtoupper((string)strtok($s, " \t\r\n("));
-  return in_array($kw, ['SELECT','SHOW','DESCRIBE','DESC','EXPLAIN'], true);
+  return in_array($kw, ['SELECT', 'SHOW', 'DESCRIBE', 'DESC', 'EXPLAIN'], true);
 }
 
 function sql_add_limit(string $sql, int $limitPlusOne): string {
-  if (preg_match('/\blimit\b/i', $sql)) return $sql;
+  if (preg_match('/\blimit\b/i', $sql)) {
+    return $sql;
+  }
   return rtrim($sql) . " LIMIT " . (int)$limitPlusOne;
 }
 
 function get_mysqli(): ?mysqli {
-  if (!is_logged_in()) return null;
+  if (!is_logged_in()) {
+    return null;
+  }
 
   $host = (string)$_SESSION['db_host'];
   $user = (string)$_SESSION['db_user'];
   $pass = (string)($_SESSION['db_pass'] ?? '');
-  $db   = (string)$_SESSION['db_name'];
+  $db = (string)$_SESSION['db_name'];
 
   mysqli_report(MYSQLI_REPORT_OFF);
 
   $conn = new mysqli($host, $user, $pass, $db);
-  if ($conn->connect_errno) return null;
+  if ($conn->connect_errno) {
+    return null;
+  }
 
   $conn->set_charset('utf8mb4');
-
-  // Reduce risk of multi-statement abuse (still depends on server settings)
-  // Note: mysqli->options must be set before real_connect; leaving as-is for simplicity.
-
   return $conn;
 }
 
@@ -173,7 +180,9 @@ function list_tables(mysqli $conn): array {
   $tables = [];
   $res = $conn->query("SHOW TABLES");
   if ($res) {
-    while ($row = $res->fetch_array(MYSQLI_NUM)) $tables[] = (string)$row[0];
+    while ($row = $res->fetch_array(MYSQLI_NUM)) {
+      $tables[] = (string)$row[0];
+    }
     $res->free();
   }
   return $tables;
@@ -189,7 +198,9 @@ function describe_table(mysqli $conn, string $table): array {
   $sql = "DESCRIBE `" . str_replace('`', '``', $table) . "`";
   $res = $conn->query($sql);
   if ($res) {
-    while ($c = $res->fetch_assoc()) $cols[] = $c;
+    while ($c = $res->fetch_assoc()) {
+      $cols[] = $c;
+    }
     $res->free();
   }
   return $cols;
@@ -201,15 +212,32 @@ function get_primary_key(mysqli $conn, string $table): ?string {
   $pkRes = $conn->query($sql);
   if ($pkRes) {
     while ($r = $pkRes->fetch_assoc()) {
-      if ((string)$r['Seq_in_index'] === '1') { $pk = (string)$r['Column_name']; break; }
+      if ((string)$r['Seq_in_index'] === '1') {
+        $pk = (string)$r['Column_name'];
+        break;
+      }
     }
     $pkRes->free();
   }
   return $pk;
 }
 
+function get_auto_increment_column(mysqli $conn, string $table): ?string {
+  $sql = "SHOW COLUMNS FROM `" . str_replace('`', '``', $table) . "`";
+  $res = $conn->query($sql);
+  if ($res) {
+    while ($row = $res->fetch_assoc()) {
+      if (isset($row['Extra']) && stripos((string)$row['Extra'], 'auto_increment') !== false) {
+        $res->free();
+        return (string)$row['Field'];
+      }
+    }
+    $res->free();
+  }
+  return null;
+}
+
 function build_search_where(mysqli $conn, string $field, string $mode, string $term, bool $caseSensitive, array &$paramsOut): string {
-  // Field is already whitelisted before calling this.
   $fieldEsc = "`" . str_replace('`', '``', $field) . "`";
   $expr = "CAST($fieldEsc AS CHAR)";
   $coll = $caseSensitive ? "utf8mb4_bin" : "utf8mb4_general_ci";
@@ -232,7 +260,9 @@ function build_search_where(mysqli $conn, string $field, string $mode, string $t
       return "$expr COLLATE $coll LIKE ?";
     case 'regexp':
       $paramsOut[] = $term;
-      if ($caseSensitive) return "$expr REGEXP BINARY ?";
+      if ($caseSensitive) {
+        return "$expr REGEXP BINARY ?";
+      }
       return "$expr COLLATE $coll REGEXP ?";
     default:
       $paramsOut[] = "%" . $term . "%";
@@ -243,8 +273,10 @@ function build_search_where(mysqli $conn, string $field, string $mode, string $t
 function stmt_bind_all_strings(mysqli_stmt $stmt, array &$params): void {
   $types = str_repeat('s', count($params));
   $bind = [];
-  $bind[] = & $types;
-  foreach ($params as $k => $v) $bind[] = & $params[$k];
+  $bind[] = &$types;
+  foreach ($params as $k => $v) {
+    $bind[] = &$params[$k];
+  }
   call_user_func_array([$stmt, 'bind_param'], $bind);
 }
 
@@ -253,7 +285,7 @@ function stmt_fetch_all_assoc(mysqli_stmt $stmt, array $fieldNames, int $maxRows
   $bindOut = [];
   foreach ($fieldNames as $name) {
     $row[$name] = null;
-    $bindOut[] = & $row[$name];
+    $bindOut[] = &$row[$name];
   }
   call_user_func_array([$stmt, 'bind_result'], $bindOut);
 
@@ -261,12 +293,238 @@ function stmt_fetch_all_assoc(mysqli_stmt $stmt, array $fieldNames, int $maxRows
   $i = 0;
   while ($stmt->fetch()) {
     $r = [];
-    foreach ($fieldNames as $name) $r[$name] = $row[$name];
+    foreach ($fieldNames as $name) {
+      $r[$name] = $row[$name];
+    }
     $rows[] = $r;
     $i++;
-    if ($maxRows > 0 && $i >= $maxRows) break;
+    if ($maxRows > 0 && $i >= $maxRows) {
+      break;
+    }
   }
   return $rows;
+}
+
+function split_sql_statements(string $sql): array {
+  $statements = [];
+  $current = '';
+  $len = strlen($sql);
+
+  $inSingle = false;
+  $inDouble = false;
+  $inBacktick = false;
+  $inLineComment = false;
+  $inBlockComment = false;
+  $escape = false;
+
+  for ($i = 0; $i < $len; $i++) {
+    $ch = $sql[$i];
+    $next = ($i + 1 < $len) ? $sql[$i + 1] : '';
+
+    if ($inLineComment) {
+      $current .= $ch;
+      if ($ch === "\n") {
+        $inLineComment = false;
+      }
+      continue;
+    }
+
+    if ($inBlockComment) {
+      $current .= $ch;
+      if ($ch === '*' && $next === '/') {
+        $current .= $next;
+        $i++;
+        $inBlockComment = false;
+      }
+      continue;
+    }
+
+    if ($inSingle) {
+      $current .= $ch;
+      if ($escape) {
+        $escape = false;
+      } elseif ($ch === '\\') {
+        $escape = true;
+      } elseif ($ch === "'") {
+        $inSingle = false;
+      }
+      continue;
+    }
+
+    if ($inDouble) {
+      $current .= $ch;
+      if ($escape) {
+        $escape = false;
+      } elseif ($ch === '\\') {
+        $escape = true;
+      } elseif ($ch === '"') {
+        $inDouble = false;
+      }
+      continue;
+    }
+
+    if ($inBacktick) {
+      $current .= $ch;
+      if ($ch === '`') {
+        $inBacktick = false;
+      }
+      continue;
+    }
+
+    if ($ch === '-' && $next === '-') {
+      $prev = ($i > 0) ? $sql[$i - 1] : '';
+      $after = ($i + 2 < $len) ? $sql[$i + 2] : '';
+      if (($i === 0 || $prev === "\n" || $prev === "\r" || ctype_space($prev)) && ($after === '' || ctype_space($after))) {
+        $current .= $ch;
+        $current .= $next;
+        $i++;
+        $inLineComment = true;
+        continue;
+      }
+    }
+
+    if ($ch === '#') {
+      $current .= $ch;
+      $inLineComment = true;
+      continue;
+    }
+
+    if ($ch === '/' && $next === '*') {
+      $current .= $ch;
+      $current .= $next;
+      $i++;
+      $inBlockComment = true;
+      continue;
+    }
+
+    if ($ch === "'") {
+      $current .= $ch;
+      $inSingle = true;
+      continue;
+    }
+
+    if ($ch === '"') {
+      $current .= $ch;
+      $inDouble = true;
+      continue;
+    }
+
+    if ($ch === '`') {
+      $current .= $ch;
+      $inBacktick = true;
+      continue;
+    }
+
+    if ($ch === ';') {
+      $trimmed = trim($current);
+      if ($trimmed !== '') {
+        $statements[] = $trimmed;
+      }
+      $current = '';
+      continue;
+    }
+
+    $current .= $ch;
+  }
+
+  $trimmed = trim($current);
+  if ($trimmed !== '') {
+    $statements[] = $trimmed;
+  }
+
+  return $statements;
+}
+
+function run_multi_sql(mysqli $conn, string $sqlInput, bool $showAll, int $limit = 50): array {
+  $results = [];
+  $statements = split_sql_statements($sqlInput);
+
+  if (empty($statements)) {
+    return [
+      'error' => 'SQL is empty.',
+      'results' => [],
+      'statement_count' => 0
+    ];
+  }
+
+  $allSql = implode(";\n", $statements);
+
+  if (!$conn->multi_query($allSql)) {
+    return [
+      'error' => $conn->error,
+      'results' => [],
+      'statement_count' => count($statements)
+    ];
+  }
+
+  $idx = 0;
+  do {
+    $stmtSql = $statements[$idx] ?? ('Statement #' . ($idx + 1));
+
+    if ($res = $conn->store_result()) {
+      $fields = $res->fetch_fields();
+      $rows = [];
+      $fetched = 0;
+
+      while ($r = $res->fetch_assoc()) {
+        $rows[] = $r;
+        $fetched++;
+        if (!$showAll && $fetched >= ($limit + 1)) {
+          break;
+        }
+      }
+
+      $hasMore = false;
+      if (!$showAll && count($rows) > $limit) {
+        $hasMore = true;
+        array_pop($rows);
+      }
+
+      $results[] = [
+        'sql' => $stmtSql,
+        'error' => null,
+        'is_resultset' => true,
+        'fields' => $fields,
+        'rows' => $rows,
+        'has_more' => $hasMore,
+        'limit' => $limit
+      ];
+      $res->free();
+    } else {
+      if ($conn->errno) {
+        $results[] = [
+          'sql' => $stmtSql,
+          'error' => $conn->error,
+          'is_resultset' => false
+        ];
+      } else {
+        $results[] = [
+          'sql' => $stmtSql,
+          'error' => null,
+          'is_resultset' => false,
+          'affected' => $conn->affected_rows
+        ];
+      }
+    }
+
+    $idx++;
+    if (!$conn->more_results()) {
+      break;
+    }
+  } while ($conn->next_result());
+
+  while ($conn->more_results()) {
+    $conn->next_result();
+    if ($extraRes = $conn->store_result()) {
+      $extraRes->free();
+    }
+  }
+
+  return [
+    'error' => null,
+    'results' => $results,
+    'statement_count' => count($statements)
+  ];
 }
 
 // ---------------------------------------------------------------------
@@ -275,7 +533,6 @@ function stmt_fetch_all_assoc(mysqli_stmt $stmt, array $fieldNames, int $maxRows
 $action = $_GET['action'] ?? '';
 
 if ($action === 'logout') {
-  // POST-only logout for CSRF safety
   if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     $_SESSION = [];
@@ -292,7 +549,7 @@ if ($action === 'login' && $_SERVER['REQUEST_METHOD'] === 'POST') {
   $host = trim((string)($_POST['host'] ?? 'localhost'));
   $user = trim((string)($_POST['user'] ?? ''));
   $pass = (string)($_POST['pass'] ?? '');
-  $db   = trim((string)($_POST['db'] ?? ''));
+  $db = trim((string)($_POST['db'] ?? ''));
 
   $test = new mysqli($host, $user, $pass, $db);
   if ($test->connect_errno) {
@@ -300,7 +557,7 @@ if ($action === 'login' && $_SERVER['REQUEST_METHOD'] === 'POST') {
   } else {
     $test->close();
 
-    session_regenerate_id(true); // session fixation defense
+    session_regenerate_id(true);
     $_SESSION['db_host'] = $host;
     $_SESSION['db_user'] = $user;
     $_SESSION['db_pass'] = $pass;
@@ -323,29 +580,26 @@ if (is_logged_in()) {
   }
 }
 
-// Flash messages
 [$flash_message, $flash_error] = flash_get();
 
 // ---------------------------------------------------------------------
-// DB actions (mutations + export + SQL console runner)
+// DB actions
 // ---------------------------------------------------------------------
 $sql_console_result = null;
 
 if ($conn) {
-  // Add column
   if ($action === 'add_column' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
 
     $table = (string)($_POST['table'] ?? '');
-    $name  = trim((string)($_POST['col_name'] ?? ''));
-    $type  = trim((string)($_POST['col_type'] ?? ''));
+    $name = trim((string)($_POST['col_name'] ?? ''));
+    $type = trim((string)($_POST['col_type'] ?? ''));
 
     if ($table === '' || !table_exists($conn, $table)) {
       set_flash("Invalid table.", true);
       redirect();
     }
 
-    // Basic name sanity (still allow underscores). Hard reject weird names.
     if ($name === '' || !preg_match('/^[A-Za-z0-9_]+$/', $name)) {
       set_flash("Invalid column name.", true);
       redirect(['action' => 'structure', 'table' => $table]);
@@ -357,17 +611,19 @@ if ($conn) {
     }
 
     $sql = "ALTER TABLE `" . str_replace('`', '``', $table) . "` ADD `" . str_replace('`', '``', $name) . "` " . $type;
-    if ($conn->query($sql)) set_flash("Column '$name' added.");
-    else set_flash("Error adding column: " . $conn->error, true);
+    if ($conn->query($sql)) {
+      set_flash("Column '$name' added.");
+    } else {
+      set_flash("Error adding column: " . $conn->error, true);
+    }
 
     redirect(['action' => 'structure', 'table' => $table]);
   }
 
-  // Drop column (POST-only)
   if ($action === 'drop_column' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
 
-    $table  = (string)($_POST['table'] ?? '');
+    $table = (string)($_POST['table'] ?? '');
     $column = (string)($_POST['column'] ?? '');
 
     if ($table === '' || !table_exists($conn, $table)) {
@@ -376,24 +632,29 @@ if ($conn) {
     }
 
     $cols = describe_table($conn, $table);
-    $fields = array_map(fn($c) => (string)$c['Field'], $cols);
+    $fields = array_map(function ($c) {
+      return (string)$c['Field'];
+    }, $cols);
+
     if (!in_array($column, $fields, true)) {
       set_flash("Invalid column.", true);
       redirect(['action' => 'structure', 'table' => $table]);
     }
 
     $sql = "ALTER TABLE `" . str_replace('`', '``', $table) . "` DROP `" . str_replace('`', '``', $column) . "`";
-    if ($conn->query($sql)) set_flash("Column '$column' dropped.");
-    else set_flash("Error dropping column: " . $conn->error, true);
+    if ($conn->query($sql)) {
+      set_flash("Column '$column' dropped.");
+    } else {
+      set_flash("Error dropping column: " . $conn->error, true);
+    }
 
     redirect(['action' => 'structure', 'table' => $table]);
   }
 
-  // Rename column (raw) - POST only
   if ($action === 'rename_column' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
 
-    $table   = (string)($_POST['table'] ?? '');
+    $table = (string)($_POST['table'] ?? '');
     $oldName = (string)($_POST['old_name'] ?? '');
     $newName = trim((string)($_POST['new_name'] ?? ''));
     $colType = trim((string)($_POST['col_type'] ?? ''));
@@ -404,7 +665,10 @@ if ($conn) {
     }
 
     $cols = describe_table($conn, $table);
-    $fields = array_map(fn($c) => (string)$c['Field'], $cols);
+    $fields = array_map(function ($c) {
+      return (string)$c['Field'];
+    }, $cols);
+
     if (!in_array($oldName, $fields, true)) {
       set_flash("Invalid original column.", true);
       redirect(['action' => 'structure', 'table' => $table]);
@@ -416,20 +680,22 @@ if ($conn) {
     }
 
     $sql = "ALTER TABLE `" . str_replace('`', '``', $table) . "` CHANGE `" .
-           str_replace('`', '``', $oldName) . "` `" .
-           str_replace('`', '``', $newName) . "` " . $colType;
+      str_replace('`', '``', $oldName) . "` `" .
+      str_replace('`', '``', $newName) . "` " . $colType;
 
-    if ($conn->query($sql)) set_flash("Column '$oldName' altered/renamed.");
-    else set_flash("Error: " . $conn->error, true);
+    if ($conn->query($sql)) {
+      set_flash("Column '$oldName' altered/renamed.");
+    } else {
+      set_flash("Error: " . $conn->error, true);
+    }
 
     redirect(['action' => 'structure', 'table' => $table]);
   }
 
-  // Change type only - POST only
   if ($action === 'change_type' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
 
-    $table   = (string)($_POST['table'] ?? '');
+    $table = (string)($_POST['table'] ?? '');
     $colName = (string)($_POST['col_name'] ?? '');
     $colType = trim((string)($_POST['col_type'] ?? ''));
 
@@ -439,7 +705,10 @@ if ($conn) {
     }
 
     $cols = describe_table($conn, $table);
-    $fields = array_map(fn($c) => (string)$c['Field'], $cols);
+    $fields = array_map(function ($c) {
+      return (string)$c['Field'];
+    }, $cols);
+
     if (!in_array($colName, $fields, true)) {
       set_flash("Invalid column.", true);
       redirect(['action' => 'structure', 'table' => $table]);
@@ -451,15 +720,17 @@ if ($conn) {
     }
 
     $sql = "ALTER TABLE `" . str_replace('`', '``', $table) . "` MODIFY `" .
-           str_replace('`', '``', $colName) . "` " . $colType;
+      str_replace('`', '``', $colName) . "` " . $colType;
 
-    if ($conn->query($sql)) set_flash("Column '$colName' changed.");
-    else set_flash("Error changing type: " . $conn->error, true);
+    if ($conn->query($sql)) {
+      set_flash("Column '$colName' changed.");
+    } else {
+      set_flash("Error changing type: " . $conn->error, true);
+    }
 
     redirect(['action' => 'structure', 'table' => $table]);
   }
 
-  // Save row (insert/update) - POST only
   if ($action === 'save_row' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
 
@@ -472,18 +743,18 @@ if ($conn) {
     $is_update = (!empty($_POST['is_update']) && $_POST['is_update'] === '1');
 
     $columnsInfo = describe_table($conn, $table);
-    $allowedCols = array_map(fn($c) => (string)$c['Field'], $columnsInfo);
+    $allowedCols = array_map(function ($c) {
+      return (string)$c['Field'];
+    }, $columnsInfo);
 
     $cols = $_POST['col'] ?? [];
     $vals = $_POST['val'] ?? [];
 
-    // Keep arrays aligned
     if (!is_array($cols) || !is_array($vals) || count($cols) !== count($vals)) {
       set_flash("Invalid form payload.", true);
       redirect(['action' => 'browse', 'table' => $table]);
     }
 
-    // Validate columns
     foreach ($cols as $c) {
       if (!is_string($c) || !in_array($c, $allowedCols, true)) {
         set_flash("Invalid column in payload.", true);
@@ -491,10 +762,12 @@ if ($conn) {
       }
     }
 
-    // Normalize NULL sentinel
     foreach ($vals as $k => $v) {
-      if ($v === '__NULL__') $vals[$k] = null;
-      elseif (!is_string($v) && $v !== null) $vals[$k] = (string)$v;
+      if ($v === '__NULL__') {
+        $vals[$k] = null;
+      } elseif (!is_string($v) && $v !== null) {
+        $vals[$k] = (string)$v;
+      }
     }
 
     $pk = get_primary_key($conn, $table);
@@ -512,7 +785,7 @@ if ($conn) {
       }
 
       $sql = "UPDATE `" . str_replace('`', '``', $table) . "` SET " . implode(', ', $setParts) .
-             " WHERE `" . str_replace('`', '``', $pk) . "` = ?";
+        " WHERE `" . str_replace('`', '``', $pk) . "` = ?";
 
       $stmt = $conn->prepare($sql);
       if (!$stmt) {
@@ -524,8 +797,11 @@ if ($conn) {
       $bindValues[] = $pkValue;
       stmt_bind_all_strings($stmt, $bindValues);
 
-      if ($stmt->execute()) set_flash("Row updated.");
-      else set_flash("Update failed: " . $stmt->error, true);
+      if ($stmt->execute()) {
+        set_flash("Row updated.");
+      } else {
+        set_flash("Update failed: " . $stmt->error, true);
+      }
 
       $stmt->close();
       redirect(['action' => 'browse', 'table' => $table]);
@@ -536,10 +812,10 @@ if ($conn) {
       }
 
       $colParts = [];
-      $place    = [];
+      $place = [];
       foreach ($cols as $colName) {
         $colParts[] = "`" . str_replace('`', '``', $colName) . "`";
-        $place[]    = "?";
+        $place[] = "?";
       }
 
       $sql = "INSERT INTO `" . str_replace('`', '``', $table) . "` (" . implode(', ', $colParts) . ") VALUES (" . implode(', ', $place) . ")";
@@ -551,21 +827,23 @@ if ($conn) {
 
       stmt_bind_all_strings($stmt, $vals);
 
-      if ($stmt->execute()) set_flash("Row inserted. ID: " . $stmt->insert_id);
-      else set_flash("Insert failed: " . $stmt->error, true);
+      if ($stmt->execute()) {
+        set_flash("Row inserted. ID: " . $stmt->insert_id);
+      } else {
+        set_flash("Insert failed: " . $stmt->error, true);
+      }
 
       $stmt->close();
       redirect(['action' => 'browse', 'table' => $table]);
     }
   }
 
-  // Delete row - POST only
   if ($action === 'delete_row' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
 
     $table = (string)($_POST['table'] ?? '');
-    $pk    = (string)($_POST['pk'] ?? '');
-    $val   = (string)($_POST['pk_value'] ?? '');
+    $pk = (string)($_POST['pk'] ?? '');
+    $val = (string)($_POST['pk_value'] ?? '');
 
     if ($table === '' || !table_exists($conn, $table)) {
       set_flash("Invalid table.", true);
@@ -585,14 +863,16 @@ if ($conn) {
       redirect(['action' => 'browse', 'table' => $table]);
     }
     $stmt->bind_param('s', $val);
-    if ($stmt->execute()) set_flash("Row deleted.");
-    else set_flash("Delete failed: " . $stmt->error, true);
+    if ($stmt->execute()) {
+      set_flash("Row deleted.");
+    } else {
+      set_flash("Delete failed: " . $stmt->error, true);
+    }
     $stmt->close();
 
     redirect(['action' => 'browse', 'table' => $table]);
   }
 
-  // EXPORT DOWNLOAD - POST only
   if ($action === 'do_export' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
 
@@ -605,9 +885,11 @@ if ($conn) {
       redirect(['action' => 'export']);
     }
 
-    // whitelist tables
     $all = list_tables($conn);
-    $tables = array_values(array_filter($tables, fn($t) => is_string($t) && in_array($t, $all, true)));
+    $tables = array_values(array_filter($tables, function ($t) use ($all) {
+      return is_string($t) && in_array($t, $all, true);
+    }));
+
     if (empty($tables)) {
       set_flash("No valid tables selected.", true);
       redirect(['action' => 'export']);
@@ -616,9 +898,17 @@ if ($conn) {
     $dbName = (string)$_SESSION['db_name'];
     $timestamp = date('Ymd_His');
 
-    if ($format === 'csv') { $ext='csv'; $contentType='text/csv; charset=utf-8'; }
-    elseif ($format === 'tsv') { $ext='tsv'; $contentType='text/tab-separated-values; charset=utf-8'; }
-    else { $ext='sql'; $contentType='text/sql; charset=utf-8'; $format='sql'; }
+    if ($format === 'csv') {
+      $ext = 'csv';
+      $contentType = 'text/csv; charset=utf-8';
+    } elseif ($format === 'tsv') {
+      $ext = 'tsv';
+      $contentType = 'text/tab-separated-values; charset=utf-8';
+    } else {
+      $ext = 'sql';
+      $contentType = 'text/sql; charset=utf-8';
+      $format = 'sql';
+    }
 
     $filename = "export_{$dbName}_{$timestamp}.{$ext}";
     header("Content-Type: {$contentType}");
@@ -654,11 +944,17 @@ if ($conn) {
             $cols = [];
             $first = true;
             while ($r = $res->fetch_assoc()) {
-              if ($first) { $cols = array_keys($r); $first = false; }
+              if ($first) {
+                $cols = array_keys($r);
+                $first = false;
+              }
               $valuesSql = [];
               foreach ($cols as $c) {
-                if (!array_key_exists($c, $r) || $r[$c] === null) $valuesSql[] = "NULL";
-                else $valuesSql[] = "'" . $conn->real_escape_string((string)$r[$c]) . "'";
+                if (!array_key_exists($c, $r) || $r[$c] === null) {
+                  $valuesSql[] = "NULL";
+                } else {
+                  $valuesSql[] = "'" . $conn->real_escape_string((string)$r[$c]) . "'";
+                }
               }
               echo "INSERT INTO `" . $table . "` (`" . implode("`,`", $cols) . "`) VALUES (" . implode(",", $valuesSql) . ");\n";
             }
@@ -676,8 +972,8 @@ if ($conn) {
       fwrite($out, "# Generated: " . date('Y-m-d H:i:s') . "\n\n");
 
       foreach ($tables as $table) {
-        $escTable = str_replace('`', '``', $table);
         fwrite($out, "# TABLE: {$table}\n");
+        $escTable = str_replace('`', '``', $table);
 
         $res = $conn->query("SELECT * FROM `{$escTable}`");
         if ($res) {
@@ -691,7 +987,9 @@ if ($conn) {
             }
             if ($withData) {
               $rowOut = [];
-              foreach ($cols as $c) $rowOut[] = ($r[$c] === null ? '' : (string)$r[$c]);
+              foreach ($cols as $c) {
+                $rowOut[] = ($r[$c] === null ? '' : (string)$r[$c]);
+              }
               fputcsv($out, $rowOut, $delimiter);
             }
           }
@@ -699,10 +997,14 @@ if ($conn) {
             $resCols = $conn->query("DESCRIBE `{$escTable}`");
             $colNames = [];
             if ($resCols) {
-              while ($c = $resCols->fetch_assoc()) $colNames[] = $c['Field'];
+              while ($c = $resCols->fetch_assoc()) {
+                $colNames[] = $c['Field'];
+              }
               $resCols->free();
             }
-            if (!empty($colNames)) fputcsv($out, $colNames, $delimiter);
+            if (!empty($colNames)) {
+              fputcsv($out, $colNames, $delimiter);
+            }
           }
           $res->free();
         }
@@ -713,77 +1015,22 @@ if ($conn) {
     exit;
   }
 
-  // SQL console runner (single statement) - POST only
   if ($action === 'run_sql' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
 
     $sqlIn = (string)($_POST['sql'] ?? '');
     $showAll = !empty($_POST['show_all']);
 
-    $sql = normalize_sql($sqlIn);
+    $sql = trim($sqlIn);
     if ($sql === '') {
       set_flash("SQL is empty.", true);
       redirect(['action' => 'sql']);
     }
 
-    // Very important: this is an admin tool; do NOT pretend we can fully sanitize SQL.
-    // We do enforce "single statement" by rejecting obvious multi-statement separators.
-    if (preg_match('/;\s*\S/', $sql)) {
-      $sql_console_result = [
-        'sql' => $sql,
-        'error' => 'Multiple statements detected. Only one statement is allowed.',
-        'is_resultset' => false
-      ];
-      $action = 'sql';
-    } else {
-      $isRS = is_resultset_sql($sql);
-      $limit = 50;
-
-      $sqlToRun = $sql;
-      if ($isRS && !$showAll) $sqlToRun = sql_add_limit($sql, $limit + 1);
-
-      $res = @$conn->query($sqlToRun);
-      if (!$res) {
-        $sql_console_result = [
-          'sql' => $sql,
-          'error' => $conn->error,
-          'is_resultset' => $isRS
-        ];
-      } else {
-        if ($res instanceof mysqli_result) {
-          $fields = $res->fetch_fields();
-          $rows = [];
-          $rowCountFetched = 0;
-          while ($r = $res->fetch_assoc()) {
-            $rows[] = $r;
-            $rowCountFetched++;
-            if (!$showAll && $rowCountFetched >= ($limit + 1)) break;
-          }
-          $res->free();
-
-          $hasMore = (!$showAll && $rowCountFetched > $limit);
-          if ($hasMore) array_pop($rows);
-
-          $sql_console_result = [
-            'sql' => $sql,
-            'error' => null,
-            'is_resultset' => true,
-            'fields' => $fields,
-            'rows' => $rows,
-            'has_more' => $hasMore,
-            'limit' => $limit
-          ];
-        } else {
-          $sql_console_result = [
-            'sql' => $sql,
-            'error' => null,
-            'is_resultset' => false,
-            'affected' => $conn->affected_rows
-          ];
-        }
-      }
-      $action = 'sql';
-    }
+    $sql_console_result = run_multi_sql($conn, $sql, $showAll, 50);
+    $sql_console_result['sql_raw'] = $sql;
+    $sql_console_result['show_all'] = $showAll;
+    $action = 'sql';
   }
 }
 
@@ -887,9 +1134,6 @@ if ($conn) {
   $action = $action ?: 'tables';
   $currentTable = (string)($_GET['table'] ?? '');
 
-  // -------------------------
-  // SQL Console page
-  // -------------------------
   if ($action === 'sql') {
     $sqlPrefill = (string)($_POST['sql'] ?? ($_GET['sql'] ?? ''));
     ?>
@@ -907,7 +1151,7 @@ if ($conn) {
         <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=run_sql" id="sqlConsoleForm">
           <?php echo csrf_field(); ?>
           <div class="mb-2">
-            <textarea name="sql" class="form-control form-control-sm mono" placeholder="Write a single SQL statement here..."><?php echo h($sqlPrefill); ?></textarea>
+            <textarea name="sql" class="form-control form-control-sm mono" placeholder="Write one or more SQL statements here..."><?php echo h($sqlPrefill); ?></textarea>
           </div>
           <input type="hidden" name="show_all" id="sql_show_all" value="0">
           <button type="submit" class="btn btn-warning btn-sm">
@@ -921,85 +1165,100 @@ if ($conn) {
     </div>
 
     <?php if ($sql_console_result !== null): ?>
-      <div class="card shadow-sm">
-        <div class="card-header">
-          <strong>Result</strong>
-        </div>
-        <div class="card-body">
-          <div class="mb-2">
-            <div class="small text-muted">SQL:</div>
-            <div class="mono small"><?php echo h($sql_console_result['sql']); ?></div>
+      <?php if (!empty($sql_console_result['error'])): ?>
+        <div class="card shadow-sm">
+          <div class="card-header">
+            <strong>Result</strong>
           </div>
-
-          <?php if (!empty($sql_console_result['error'])): ?>
+          <div class="card-body">
+            <div class="mb-2">
+              <div class="small text-muted">SQL:</div>
+              <div class="mono small"><?php echo h($sql_console_result['sql_raw'] ?? ''); ?></div>
+            </div>
             <div class="alert alert-danger mb-0">
               <strong>Error:</strong> <?php echo h($sql_console_result['error']); ?>
             </div>
-          <?php else: ?>
+          </div>
+        </div>
+      <?php else: ?>
+        <div class="alert alert-info">
+          Executed <?php echo (int)($sql_console_result['statement_count'] ?? 0); ?> statement(s).
+        </div>
 
-            <?php if (!$sql_console_result['is_resultset']): ?>
-              <div class="alert alert-success mb-0">
-                Statement executed successfully. Affected rows: <?php echo (int)$sql_console_result['affected']; ?>
+        <?php foreach (($sql_console_result['results'] ?? []) as $i => $resItem): ?>
+          <div class="card shadow-sm mb-3">
+            <div class="card-header">
+              <strong>Statement <?php echo (int)($i + 1); ?></strong>
+            </div>
+            <div class="card-body">
+              <div class="mb-2">
+                <div class="small text-muted">SQL:</div>
+                <div class="mono small"><?php echo h($resItem['sql'] ?? ''); ?></div>
               </div>
-            <?php else: ?>
 
-              <?php
-                $limit = (int)$sql_console_result['limit'];
-                $rows = $sql_console_result['rows'];
-                $hasMore = !empty($sql_console_result['has_more']);
-              ?>
-
-              <?php if ($hasMore): ?>
-                <div class="alert alert-warning d-flex justify-content-between align-items-center">
-                  <div>
-                    Displaying the first <?php echo (int)$limit; ?> rows.
-                    Loading the entire result set may be slow and could use significant memory.
-                  </div>
-                  <button class="btn btn-sm btn-outline-dark"
-                          onclick="runSqlShowAll(); return false;">
-                    Show all rows
-                  </button>
+              <?php if (!empty($resItem['error'])): ?>
+                <div class="alert alert-danger mb-0">
+                  <strong>Error:</strong> <?php echo h($resItem['error']); ?>
                 </div>
               <?php else: ?>
-                <div class="alert alert-success">
-                  Query returned <?php echo count($rows); ?> row(s).
-                </div>
-              <?php endif; ?>
+                <?php if (empty($resItem['is_resultset'])): ?>
+                  <div class="alert alert-success mb-0">
+                    Statement executed successfully. Affected rows: <?php echo (int)($resItem['affected'] ?? 0); ?>
+                  </div>
+                <?php else: ?>
+                  <?php
+                    $limit = (int)($resItem['limit'] ?? 50);
+                    $rows = $resItem['rows'] ?? [];
+                    $hasMore = !empty($resItem['has_more']);
+                  ?>
 
-              <div class="table-responsive">
-                <table class="table table-sm table-bordered table-striped table-fixed">
-                  <thead class="table-light">
-                    <tr>
-                      <?php foreach ($sql_console_result['fields'] as $f): ?>
-                        <th><?php echo h($f->name); ?></th>
-                      <?php endforeach; ?>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <?php foreach ($rows as $r): ?>
-                      <tr>
-                        <?php foreach ($sql_console_result['fields'] as $f): ?>
-                          <td><?php echo h((string)($r[$f->name] ?? '')); ?></td>
+                  <?php if ($hasMore): ?>
+                    <div class="alert alert-warning d-flex justify-content-between align-items-center">
+                      <div>
+                        Displaying the first <?php echo (int)$limit; ?> rows.
+                        Loading the entire result set may be slow and could use significant memory.
+                      </div>
+                      <button class="btn btn-sm btn-outline-dark" onclick="runSqlShowAll(); return false;">
+                        Show all rows
+                      </button>
+                    </div>
+                  <?php else: ?>
+                    <div class="alert alert-success">
+                      Query returned <?php echo count($rows); ?> row(s).
+                    </div>
+                  <?php endif; ?>
+
+                  <div class="table-responsive">
+                    <table class="table table-sm table-bordered table-striped table-fixed">
+                      <thead class="table-light">
+                        <tr>
+                          <?php foreach (($resItem['fields'] ?? []) as $f): ?>
+                            <th><?php echo h($f->name); ?></th>
+                          <?php endforeach; ?>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <?php foreach ($rows as $r): ?>
+                          <tr>
+                            <?php foreach (($resItem['fields'] ?? []) as $f): ?>
+                              <td><?php echo h((string)($r[$f->name] ?? '')); ?></td>
+                            <?php endforeach; ?>
+                          </tr>
                         <?php endforeach; ?>
-                      </tr>
-                    <?php endforeach; ?>
-                  </tbody>
-                </table>
-              </div>
-
-            <?php endif; ?>
-
-          <?php endif; ?>
-        </div>
-      </div>
+                      </tbody>
+                    </table>
+                  </div>
+                <?php endif; ?>
+              <?php endif; ?>
+            </div>
+          </div>
+        <?php endforeach; ?>
+      <?php endif; ?>
     <?php endif; ?>
 
     <?php
   }
 
-  // -------------------------
-  // Export page
-  // -------------------------
   if ($action === 'export') {
     $tables = list_tables($conn);
     ?>
@@ -1062,9 +1321,6 @@ if ($conn) {
     <?php
   }
 
-  // -------------------------
-  // Tables page
-  // -------------------------
   if ($action === 'tables') {
     $tables = list_tables($conn);
     ?>
@@ -1095,24 +1351,24 @@ if ($conn) {
     <?php
   }
 
-  // -------------------------
-  // Browse table with SEARCH (prepared statements, no get_result dependency)
-  // -------------------------
   if ($action === 'browse' && $currentTable !== '') {
     $table = $currentTable;
     if (!table_exists($conn, $table)) {
       echo '<div class="alert alert-danger">Invalid table.</div>';
     } else {
       $columns = describe_table($conn, $table);
-      $fieldsList = array_map(fn($c) => (string)$c['Field'], $columns);
+      $fieldsList = array_map(function ($c) {
+        return (string)$c['Field'];
+      }, $columns);
       $defaultField = $fieldsList[0] ?? '';
 
       $s_enabled = !empty($_GET['s_enabled']);
       $s_field = (string)($_GET['s_field'] ?? $defaultField);
-      $s_mode  = (string)($_GET['s_mode'] ?? 'like');
-      $s_term  = (string)($_GET['s_term'] ?? '');
-      $s_cs    = !empty($_GET['s_cs']);
+      $s_mode = (string)($_GET['s_mode'] ?? 'like');
+      $s_term = (string)($_GET['s_term'] ?? '');
+      $s_cs = !empty($_GET['s_cs']);
       $show_all = !empty($_GET['show_all']);
+      $browse_desc = !empty($_GET['browse_desc']);
 
       $hasWhere = false;
       $whereSql = '';
@@ -1123,7 +1379,6 @@ if ($conn) {
         $hasWhere = true;
       }
 
-      // COUNT
       $count = 0;
       if ($hasWhere) {
         $sqlCount = "SELECT COUNT(*) AS c FROM `" . str_replace('`', '``', $table) . "` WHERE $whereSql";
@@ -1132,7 +1387,9 @@ if ($conn) {
           stmt_bind_all_strings($stmt, $params);
           $stmt->execute();
           $stmt->bind_result($c);
-          if ($stmt->fetch()) $count = (int)$c;
+          if ($stmt->fetch()) {
+            $count = (int)$c;
+          }
           $stmt->close();
         }
       } else {
@@ -1147,11 +1404,20 @@ if ($conn) {
       $limit = 50;
       $rows = [];
       $hasMore = false;
+      $autoIncrementField = get_auto_increment_column($conn, $table);
 
-      // DATA
       $sql = "SELECT * FROM `" . str_replace('`', '``', $table) . "`";
-      if ($hasWhere) $sql .= " WHERE $whereSql";
-      if (!$show_all) $sql .= " LIMIT " . (int)($limit + 1);
+      if ($hasWhere) {
+        $sql .= " WHERE $whereSql";
+      }
+
+      if ($browse_desc && $autoIncrementField !== null) {
+        $sql .= " ORDER BY `" . str_replace('`', '``', $autoIncrementField) . "` DESC";
+      }
+
+      if (!$show_all) {
+        $sql .= " LIMIT " . (int)($limit + 1);
+      }
 
       if ($hasWhere) {
         $stmt = $conn->prepare($sql);
@@ -1178,13 +1444,17 @@ if ($conn) {
             $hasMore = true;
             array_pop($rows);
           }
+        } else {
+          $fields = [];
         }
       } else {
         $res = $conn->query($sql);
         $fields = [];
         if ($res) {
           $fields = $res->fetch_fields();
-          while ($r = $res->fetch_assoc()) $rows[] = $r;
+          while ($r = $res->fetch_assoc()) {
+            $rows[] = $r;
+          }
           $res->free();
           if (!$show_all && count($rows) > $limit) {
             $hasMore = true;
@@ -1201,12 +1471,41 @@ if ($conn) {
         $paramsUrl['s_field'] = $s_field;
         $paramsUrl['s_mode'] = $s_mode;
         $paramsUrl['s_term'] = $s_term;
-        if ($s_cs) $paramsUrl['s_cs'] = 1;
+        if ($s_cs) {
+          $paramsUrl['s_cs'] = 1;
+        }
+      }
+      if ($browse_desc && $autoIncrementField !== null) {
+        $paramsUrl['browse_desc'] = 1;
       }
       $paramsUrl['show_all'] = 1;
       $showAllUrl = $_SERVER['PHP_SELF'] . '?' . http_build_query($paramsUrl);
+
+      $descParamsUrl = ['action' => 'browse', 'table' => $table, 'browse_desc' => 1];
+      if ($s_enabled) {
+        $descParamsUrl['s_enabled'] = 1;
+        $descParamsUrl['s_field'] = $s_field;
+        $descParamsUrl['s_mode'] = $s_mode;
+        $descParamsUrl['s_term'] = $s_term;
+        if ($s_cs) {
+          $descParamsUrl['s_cs'] = 1;
+        }
+      }
+      $browseDescUrl = $_SERVER['PHP_SELF'] . '?' . http_build_query($descParamsUrl);
+
+      $normalBrowseParams = ['action' => 'browse', 'table' => $table];
+      if ($s_enabled) {
+        $normalBrowseParams['s_enabled'] = 1;
+        $normalBrowseParams['s_field'] = $s_field;
+        $normalBrowseParams['s_mode'] = $s_mode;
+        $normalBrowseParams['s_term'] = $s_term;
+        if ($s_cs) {
+          $normalBrowseParams['s_cs'] = 1;
+        }
+      }
+      $normalBrowseUrl = $_SERVER['PHP_SELF'] . '?' . http_build_query($normalBrowseParams);
       ?>
-      <div class="mb-3 d-flex gap-2">
+      <div class="mb-3 d-flex gap-2 flex-wrap">
         <a href="<?php echo h($_SERVER['PHP_SELF']); ?>" class="btn btn-secondary btn-sm">
           <i class="fa-solid fa-arrow-left"></i> Tables
         </a>
@@ -1220,6 +1519,16 @@ if ($conn) {
         <button class="btn btn-success btn-sm" onclick="document.getElementById('insertForm').scrollIntoView();">
           <i class="fa-solid fa-plus"></i> Insert row
         </button>
+        <?php if ($autoIncrementField !== null): ?>
+          <a href="<?php echo h($browseDescUrl); ?>" class="btn btn-outline-dark btn-sm">
+            <i class="fa-solid fa-sort-down"></i> Browse last 50 records desc
+          </a>
+          <?php if ($browse_desc): ?>
+            <a href="<?php echo h($normalBrowseUrl); ?>" class="btn btn-outline-secondary btn-sm">
+              <i class="fa-solid fa-list"></i> Normal browse
+            </a>
+          <?php endif; ?>
+        <?php endif; ?>
       </div>
 
       <div class="card shadow-sm mb-3">
@@ -1232,6 +1541,9 @@ if ($conn) {
             <input type="hidden" name="action" value="browse">
             <input type="hidden" name="table" value="<?php echo h($table); ?>">
             <input type="hidden" name="s_enabled" value="1">
+            <?php if ($browse_desc && $autoIncrementField !== null): ?>
+              <input type="hidden" name="browse_desc" value="1">
+            <?php endif; ?>
             <div class="col-md-3">
               <label class="form-label small">Field</label>
               <select name="s_field" class="form-select form-select-sm">
@@ -1245,11 +1557,11 @@ if ($conn) {
             <div class="col-md-2">
               <label class="form-label small">Match</label>
               <select name="s_mode" class="form-select form-select-sm">
-                <option value="exact"  <?php echo $s_mode==='exact'?'selected':''; ?>>Exact</option>
-                <option value="like"   <?php echo $s_mode==='like'?'selected':''; ?>>Contains (LIKE %...%)</option>
-                <option value="starts" <?php echo $s_mode==='starts'?'selected':''; ?>>Starts with</option>
-                <option value="ends"   <?php echo $s_mode==='ends'?'selected':''; ?>>Ends with</option>
-                <option value="regexp" <?php echo $s_mode==='regexp'?'selected':''; ?>>REGEXP</option>
+                <option value="exact" <?php echo $s_mode === 'exact' ? 'selected' : ''; ?>>Exact</option>
+                <option value="like" <?php echo $s_mode === 'like' ? 'selected' : ''; ?>>Contains (LIKE %...%)</option>
+                <option value="starts" <?php echo $s_mode === 'starts' ? 'selected' : ''; ?>>Starts with</option>
+                <option value="ends" <?php echo $s_mode === 'ends' ? 'selected' : ''; ?>>Ends with</option>
+                <option value="regexp" <?php echo $s_mode === 'regexp' ? 'selected' : ''; ?>>REGEXP</option>
               </select>
             </div>
             <div class="col-md-4">
@@ -1274,6 +1586,12 @@ if ($conn) {
               </a>
             </div>
           </form>
+
+          <?php if ($browse_desc && $autoIncrementField !== null): ?>
+            <div class="alert alert-secondary">
+              Ordered by <strong><?php echo h($autoIncrementField); ?></strong> DESC.
+            </div>
+          <?php endif; ?>
 
           <?php if ($hasMore): ?>
             <div class="alert alert-warning d-flex justify-content-between align-items-center">
@@ -1347,7 +1665,6 @@ if ($conn) {
         </div>
       </div>
 
-      <!-- Insert form -->
       <div class="card shadow-sm" id="insertForm">
         <div class="card-header">
           <strong><i class="fa-solid fa-plus"></i> Insert new row in <?php echo h($table); ?></strong>
@@ -1359,9 +1676,9 @@ if ($conn) {
             <input type="hidden" name="is_update" value="0">
             <div class="row g-2">
               <?php foreach ($columns as $c):
-                $field    = (string)$c['Field'];
-                $typeDef  = (string)$c['Type'];
-                $typeLow  = strtolower($typeDef);
+                $field = (string)$c['Field'];
+                $typeDef = (string)$c['Type'];
+                $typeLow = strtolower($typeDef);
                 $nullable = ((string)$c['Null'] === 'YES');
               ?>
                 <div class="col-md-4">
@@ -1375,7 +1692,9 @@ if ($conn) {
                   if (strpos($typeLow, 'enum(') === 0 || strpos($typeLow, 'set(') === 0) {
                     $enumVals = parse_enum_set_values($typeDef);
                     echo '<select name="val[]" class="form-select form-select-sm">';
-                    if ($nullable) echo '<option value="__NULL__">(NULL)</option>';
+                    if ($nullable) {
+                      echo '<option value="__NULL__">(NULL)</option>';
+                    }
                     foreach ($enumVals as $v) {
                       $hv = h($v);
                       echo '<option value="' . $hv . '">' . $hv . '</option>';
@@ -1412,11 +1731,8 @@ if ($conn) {
     }
   }
 
-  // -------------------------
-  // Edit row
-  // -------------------------
   if ($action === 'edit_row' && $currentTable !== '' && isset($_GET['pk_value'])) {
-    $table   = $currentTable;
+    $table = $currentTable;
     if (!table_exists($conn, $table)) {
       echo '<div class="alert alert-danger">Invalid table.</div>';
     } else {
@@ -1426,7 +1742,7 @@ if ($conn) {
       if ($pk === null) {
         echo '<div class="alert alert-danger">Cannot edit: table has no single-column primary key.</div>';
       } else {
-        $sql = "SELECT * FROM `" . str_replace('`','``',$table) . "` WHERE `" . str_replace('`','``',$pk) . "` = ? LIMIT 1";
+        $sql = "SELECT * FROM `" . str_replace('`', '``', $table) . "` WHERE `" . str_replace('`', '``', $pk) . "` = ? LIMIT 1";
         $stmt = $conn->prepare($sql);
         $row = null;
         if ($stmt) {
@@ -1436,7 +1752,9 @@ if ($conn) {
           $meta = $stmt->result_metadata();
           $fieldNames = [];
           if ($meta) {
-            while ($f = $meta->fetch_field()) $fieldNames[] = $f->name;
+            while ($f = $meta->fetch_field()) {
+              $fieldNames[] = $f->name;
+            }
             $meta->free();
           }
 
@@ -1449,9 +1767,11 @@ if ($conn) {
           echo '<div class="alert alert-warning">Row not found.</div>';
         } else {
           $colInfo = [];
-          $infoRes = $conn->query("DESCRIBE `" . str_replace('`','``',$table) . "`");
+          $infoRes = $conn->query("DESCRIBE `" . str_replace('`', '``', $table) . "`");
           if ($infoRes) {
-            while ($ci = $infoRes->fetch_assoc()) $colInfo[(string)$ci['Field']] = $ci;
+            while ($ci = $infoRes->fetch_assoc()) {
+              $colInfo[(string)$ci['Field']] = $ci;
+            }
             $infoRes->free();
           }
           ?>
@@ -1474,9 +1794,9 @@ if ($conn) {
 
                 <div class="row g-2">
                   <?php foreach (array_keys($row) as $col):
-                    $val      = $row[$col];
-                    $typeDef  = (string)($colInfo[$col]['Type'] ?? 'text');
-                    $typeLow  = strtolower($typeDef);
+                    $val = $row[$col];
+                    $typeDef = (string)($colInfo[$col]['Type'] ?? 'text');
+                    $typeLow = strtolower($typeDef);
                     $nullable = !empty($colInfo[$col]) && (string)$colInfo[$col]['Null'] === 'YES';
                     $displayVal = ($val === null ? '' : (string)$val);
                   ?>
@@ -1538,9 +1858,6 @@ if ($conn) {
     }
   }
 
-  // -------------------------
-  // Structure page (FIX: safe JS embedding for ENUM types)
-  // -------------------------
   if ($action === 'structure' && $currentTable !== '') {
     $table = $currentTable;
     if (!table_exists($conn, $table)) {
@@ -1571,9 +1888,9 @@ if ($conn) {
                 <?php foreach ($cols as $c): ?>
                   <?php
                     $field = (string)$c['Field'];
-                    $type  = (string)$c['Type'];
-                    $null  = (string)$c['Null'];
-                    $def   = (string)($c['Default'] ?? '');
+                    $type = (string)$c['Type'];
+                    $null = (string)$c['Null'];
+                    $def = (string)($c['Default'] ?? '');
                   ?>
                   <tr>
                     <td><?php echo h($field); ?></td>
@@ -1621,7 +1938,6 @@ if ($conn) {
         </div>
       </div>
 
-      <!-- Add Column (UI builder) -->
       <div class="card shadow-sm mb-3">
         <div class="card-header">
           <strong><i class="fa-solid fa-plus"></i> Add Column</strong>
@@ -1699,7 +2015,6 @@ if ($conn) {
         </div>
       </div>
 
-      <!-- Change type (UI builder) -->
       <div class="card shadow-sm mb-3" id="changeTypeCard" style="display:none;">
         <div class="card-header">
           <strong><i class="fa-solid fa-font"></i> Change Column Type</strong>
@@ -1782,7 +2097,6 @@ if ($conn) {
         </div>
       </div>
 
-      <!-- Rename raw -->
       <div class="card shadow-sm" id="renameCard" style="display:none;">
         <div class="card-header">
           <strong><i class="fa-solid fa-i-cursor"></i> Rename / Raw Alter Column</strong>
@@ -1823,10 +2137,11 @@ endif; ?>
 <script>
 function toggleAllTables(flag) {
   var boxes = document.querySelectorAll('.export-table-checkbox');
-  boxes.forEach(function(b) { b.checked = !!flag; });
+  boxes.forEach(function(b) {
+    b.checked = !!flag;
+  });
 }
 
-// SQL console: show all
 function runSqlShowAll() {
   document.getElementById('sql_show_all').value = '1';
   document.getElementById('sqlConsoleForm').submit();
@@ -1839,12 +2154,9 @@ function toggleRename(table, field, type) {
   document.getElementById('renameNewName').value = field;
   document.getElementById('renameColType').value = type;
   card.style.display = 'block';
-  card.scrollIntoView({behavior:'smooth'});
+  card.scrollIntoView({behavior: 'smooth'});
 }
 
-// -------------------------
-// Type builder (Add Column)
-// -------------------------
 function updateAddTypeUI() {
   var base = document.getElementById('add_type_base').value;
   var lenGroup = document.getElementById('add_length_group');
@@ -1855,11 +2167,15 @@ function updateAddTypeUI() {
   enumGroup.style.display = 'none';
   customGroup.style.display = 'none';
 
-  if (base === 'ENUM' || base === 'SET') enumGroup.style.display = 'block';
-  if (['CHAR','VARCHAR','DECIMAL','FLOAT','DOUBLE','INT','TINYINT','SMALLINT','MEDIUMINT','BIGINT'].indexOf(base) !== -1) {
+  if (base === 'ENUM' || base === 'SET') {
+    enumGroup.style.display = 'block';
+  }
+  if (['CHAR', 'VARCHAR', 'DECIMAL', 'FLOAT', 'DOUBLE', 'INT', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'BIGINT'].indexOf(base) !== -1) {
     lenGroup.style.display = 'block';
   }
-  if (base === 'CUSTOM') customGroup.style.display = 'block';
+  if (base === 'CUSTOM') {
+    customGroup.style.display = 'block';
+  }
 }
 
 function updateAddDefaultUI() {
@@ -1873,7 +2189,10 @@ function buildAddColumnType() {
 
   if (base === 'CUSTOM') {
     var raw = document.getElementById('add_custom_type').value.trim();
-    if (!raw) { alert('Please enter a custom/raw MySQL type definition.'); return false; }
+    if (!raw) {
+      alert('Please enter a custom/raw MySQL type definition.');
+      return false;
+    }
     colTypeInput.value = raw;
     return true;
   }
@@ -1892,16 +2211,24 @@ function buildAddColumnType() {
   var defVal = document.getElementById('add_default_value').value;
 
   if (base === 'ENUM' || base === 'SET') {
-    if (!enumStr) { alert('Please provide values for ' + base + ' (comma separated).'); return false; }
+    if (!enumStr) {
+      alert('Please provide values for ' + base + ' (comma separated).');
+      return false;
+    }
     var parts = enumStr.split(',');
     var vals = [];
     parts.forEach(function(p) {
       var v = p.trim();
-      if (!v.length) return;
+      if (!v.length) {
+        return;
+      }
       v = v.replace(/\\/g, "\\\\").replace(/'/g, "''");
       vals.push("'" + v + "'");
     });
-    if (!vals.length) { alert('Please provide at least one non-empty value for ' + base + '.'); return false; }
+    if (!vals.length) {
+      alert('Please provide at least one non-empty value for ' + base + '.');
+      return false;
+    }
     typeDef = base + '(' + vals.join(',') + ')';
   } else if (len && allowLenTypes[base]) {
     typeDef = base + '(' + len + ')';
@@ -1909,9 +2236,11 @@ function buildAddColumnType() {
 
   typeDef += nullable ? ' NULL' : ' NOT NULL';
 
-  if (defMode === 'null') typeDef += ' DEFAULT NULL';
-  else if (defMode === 'current_timestamp') typeDef += ' DEFAULT CURRENT_TIMESTAMP';
-  else if (defMode === 'value') {
+  if (defMode === 'null') {
+    typeDef += ' DEFAULT NULL';
+  } else if (defMode === 'current_timestamp') {
+    typeDef += ' DEFAULT CURRENT_TIMESTAMP';
+  } else if (defMode === 'value') {
     var v = defVal.replace(/\\/g, "\\\\").replace(/'/g, "''");
     typeDef += " DEFAULT '" + v + "'";
   }
@@ -1920,9 +2249,6 @@ function buildAddColumnType() {
   return true;
 }
 
-// -------------------------
-// Type builder (Change Type)
-// -------------------------
 function updateChangeTypeUI() {
   var base = document.getElementById('ct_type_base').value;
   var lenGroup = document.getElementById('ct_length_group');
@@ -1933,11 +2259,15 @@ function updateChangeTypeUI() {
   enumGroup.style.display = 'none';
   customGroup.style.display = 'none';
 
-  if (base === 'ENUM' || base === 'SET') enumGroup.style.display = 'block';
-  if (['CHAR','VARCHAR','DECIMAL','FLOAT','DOUBLE','INT','TINYINT','SMALLINT','MEDIUMINT','BIGINT'].indexOf(base) !== -1) {
+  if (base === 'ENUM' || base === 'SET') {
+    enumGroup.style.display = 'block';
+  }
+  if (['CHAR', 'VARCHAR', 'DECIMAL', 'FLOAT', 'DOUBLE', 'INT', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'BIGINT'].indexOf(base) !== -1) {
     lenGroup.style.display = 'block';
   }
-  if (base === 'CUSTOM') customGroup.style.display = 'block';
+  if (base === 'CUSTOM') {
+    customGroup.style.display = 'block';
+  }
 }
 
 function updateChangeTypeDefaultUI() {
@@ -1951,7 +2281,10 @@ function buildChangeTypeColumnType() {
 
   if (base === 'CUSTOM') {
     var raw = document.getElementById('ct_custom_type').value.trim();
-    if (!raw) { alert('Please enter a custom/raw MySQL type definition.'); return false; }
+    if (!raw) {
+      alert('Please enter a custom/raw MySQL type definition.');
+      return false;
+    }
     colTypeInput.value = raw;
     return true;
   }
@@ -1970,16 +2303,24 @@ function buildChangeTypeColumnType() {
   var defVal = document.getElementById('ct_default_value').value;
 
   if (base === 'ENUM' || base === 'SET') {
-    if (!enumStr) { alert('Please provide values for ' + base + ' (comma separated).'); return false; }
+    if (!enumStr) {
+      alert('Please provide values for ' + base + ' (comma separated).');
+      return false;
+    }
     var parts = enumStr.split(',');
     var vals = [];
     parts.forEach(function(p) {
       var v = p.trim();
-      if (!v.length) return;
+      if (!v.length) {
+        return;
+      }
       v = v.replace(/\\/g, "\\\\").replace(/'/g, "''");
       vals.push("'" + v + "'");
     });
-    if (!vals.length) { alert('Please provide at least one non-empty value for ' + base + '.'); return false; }
+    if (!vals.length) {
+      alert('Please provide at least one non-empty value for ' + base + '.');
+      return false;
+    }
     typeDef = base + '(' + vals.join(',') + ')';
   } else if (len && allowLenTypes[base]) {
     typeDef = base + '(' + len + ')';
@@ -1987,9 +2328,11 @@ function buildChangeTypeColumnType() {
 
   typeDef += nullable ? ' NULL' : ' NOT NULL';
 
-  if (defMode === 'null') typeDef += ' DEFAULT NULL';
-  else if (defMode === 'current_timestamp') typeDef += ' DEFAULT CURRENT_TIMESTAMP';
-  else if (defMode === 'value') {
+  if (defMode === 'null') {
+    typeDef += ' DEFAULT NULL';
+  } else if (defMode === 'current_timestamp') {
+    typeDef += ' DEFAULT CURRENT_TIMESTAMP';
+  } else if (defMode === 'value') {
     var v = defVal.replace(/\\/g, "\\\\").replace(/'/g, "''");
     typeDef += " DEFAULT '" + v + "'";
   }
@@ -2017,26 +2360,33 @@ function toggleChangeType(table, field, type, nullable, defVal) {
   updateChangeTypeUI();
 
   card.style.display = 'block';
-  card.scrollIntoView({behavior:'smooth'});
+  card.scrollIntoView({behavior: 'smooth'});
 }
 
-if (document.getElementById('add_type_base')) { updateAddTypeUI(); updateAddDefaultUI(); }
+if (document.getElementById('add_type_base')) {
+  updateAddTypeUI();
+  updateAddDefaultUI();
+}
 
 function b64ToUtf8(b64) {
   try {
-    // atob gives a binary string; decode to UTF-8 properly
     return decodeURIComponent(Array.prototype.map.call(atob(b64), function(c) {
       return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
     }).join(''));
-  } catch(e) {
-    // fallback: atob only
-    try { return atob(b64); } catch(_) { return ''; }
+  } catch (e) {
+    try {
+      return atob(b64);
+    } catch (_) {
+      return '';
+    }
   }
 }
 
 document.addEventListener('click', function(e) {
   var btn = e.target.closest('.js-change-type');
-  if (!btn) return;
+  if (!btn) {
+    return;
+  }
 
   var table = btn.dataset.table || '';
   var field = btn.dataset.field || '';
@@ -2046,17 +2396,19 @@ document.addEventListener('click', function(e) {
 
   toggleChangeType(table, field, type, nullable, defVal);
 });
+
 document.addEventListener('click', function(e) {
   var btn = e.target.closest('.js-rename-col');
-  if (!btn) return;
+  if (!btn) {
+    return;
+  }
 
   var table = btn.dataset.table || '';
   var field = btn.dataset.field || '';
-  var type  = b64ToUtf8(btn.dataset.typeB64 || '');
+  var type = b64ToUtf8(btn.dataset.typeB64 || '');
 
   toggleRename(table, field, type);
 });
-
 </script>
 
 </body>
