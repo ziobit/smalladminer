@@ -1,23 +1,13 @@
 <?php
 /**
  * Mini Adminer-like single-file DB tool (MariaDB/MySQL)
- * Requirements:
- * - PHP 7.2+
- * - mysqli
- *
- * Security hardening highlights:
- * - CSRF protection on all state-changing actions (POST-only for mutations)
- * - No destructive actions via GET
- * - Session fixation defense (regenerate ID on login)
- * - Security headers (CSP-lite, XFO, etc.)
- * - Whitelisting tables/columns by reading schema (prevents identifier tampering)
- * - Safe JS embedding via json_encode (fixes ENUM/SET quotes breaking onclick handlers)
+ * PHP 7.2+
  */
 
 declare(strict_types=1);
 
 // -----------------------------
-// Security headers (best-effort)
+// Security headers
 // -----------------------------
 header('X-Frame-Options: DENY');
 header('X-Content-Type-Options: nosniff');
@@ -28,7 +18,7 @@ header("Cross-Origin-Resource-Policy: same-origin");
 header("Content-Security-Policy: default-src 'self' https: data:; script-src 'self' https: 'unsafe-inline'; style-src 'self' https: 'unsafe-inline'; img-src 'self' https: data:;");
 
 // -----------------------------
-// Session hardening (PHP 7.2 safe)
+// Session hardening
 // -----------------------------
 ini_set('session.use_strict_mode', '1');
 ini_set('session.cookie_httponly', '1');
@@ -39,8 +29,10 @@ if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
 
 session_start();
 
-// error_reporting(E_ALL);
-// ini_set('display_errors', 1);
+// -----------------------------
+// Constants
+// -----------------------------
+define('ZBDB_JSON_FILE', __DIR__ . '/zbdb.json');
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -91,14 +83,22 @@ function csrf_field(): string {
 
 function csrf_check(): void {
   if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    set_flash("Invalid request method.", true);
-    redirect();
+    json_or_redirect_error("Invalid request method.");
   }
   $t = $_POST['csrf_token'] ?? '';
   if (!is_string($t) || $t === '' || !hash_equals((string)($_SESSION['csrf_token'] ?? ''), $t)) {
-    set_flash("CSRF validation failed.", true);
-    redirect();
+    json_or_redirect_error("CSRF validation failed.");
   }
+}
+
+function json_or_redirect_error(string $msg): void {
+  if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) || (isset($_POST['ajax']) && $_POST['ajax'] === '1')) {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => false, 'error' => $msg]);
+    exit;
+  }
+  set_flash($msg, true);
+  redirect();
 }
 
 function parse_enum_set_values(string $typeDef): array {
@@ -132,41 +132,20 @@ function parse_enum_set_values(string $typeDef): array {
   return $values;
 }
 
-function normalize_sql(string $sql): string {
-  $sql = trim($sql);
-  $sql = preg_replace('/^\xEF\xBB\xBF/', '', $sql);
-  $sql = preg_replace('/;+\s*$/', '', $sql);
-  return trim((string)$sql);
-}
-
-function is_resultset_sql(string $sql): bool {
-  $s = ltrim($sql);
-  $s = preg_replace('/^\/\*.*?\*\//s', '', $s);
-  $s = ltrim((string)$s);
-  $kw = strtoupper((string)strtok($s, " \t\r\n("));
-  return in_array($kw, ['SELECT', 'SHOW', 'DESCRIBE', 'DESC', 'EXPLAIN'], true);
-}
-
-function sql_add_limit(string $sql, int $limitPlusOne): string {
-  if (preg_match('/\blimit\b/i', $sql)) {
-    return $sql;
-  }
-  return rtrim($sql) . " LIMIT " . (int)$limitPlusOne;
-}
-
 function get_mysqli(): ?mysqli {
   if (!is_logged_in()) {
     return null;
   }
 
-  $host = (string)$_SESSION['db_host'];
-  $user = (string)$_SESSION['db_user'];
-  $pass = (string)($_SESSION['db_pass'] ?? '');
-  $db = (string)$_SESSION['db_name'];
-
   mysqli_report(MYSQLI_REPORT_OFF);
 
-  $conn = new mysqli($host, $user, $pass, $db);
+  $conn = new mysqli(
+    (string)$_SESSION['db_host'],
+    (string)$_SESSION['db_user'],
+    (string)($_SESSION['db_pass'] ?? ''),
+    (string)$_SESSION['db_name']
+  );
+
   if ($conn->connect_errno) {
     return null;
   }
@@ -188,8 +167,7 @@ function list_tables(mysqli $conn): array {
 }
 
 function table_exists(mysqli $conn, string $table): bool {
-  $tables = list_tables($conn);
-  return in_array($table, $tables, true);
+  return in_array($table, list_tables($conn), true);
 }
 
 function describe_table(mysqli $conn, string $table): array {
@@ -208,22 +186,21 @@ function describe_table(mysqli $conn, string $table): array {
 function get_primary_key(mysqli $conn, string $table): ?string {
   $pk = null;
   $sql = "SHOW KEYS FROM `" . str_replace('`', '``', $table) . "` WHERE Key_name='PRIMARY'";
-  $pkRes = $conn->query($sql);
-  if ($pkRes) {
-    while ($r = $pkRes->fetch_assoc()) {
+  $res = $conn->query($sql);
+  if ($res) {
+    while ($r = $res->fetch_assoc()) {
       if ((string)$r['Seq_in_index'] === '1') {
         $pk = (string)$r['Column_name'];
         break;
       }
     }
-    $pkRes->free();
+    $res->free();
   }
   return $pk;
 }
 
 function get_auto_increment_column(mysqli $conn, string $table): ?string {
-  $sql = "SHOW COLUMNS FROM `" . str_replace('`', '``', $table) . "`";
-  $res = $conn->query($sql);
+  $res = $conn->query("SHOW COLUMNS FROM `" . str_replace('`', '``', $table) . "`");
   if ($res) {
     while ($row = $res->fetch_assoc()) {
       if (isset($row['Extra']) && stripos((string)$row['Extra'], 'auto_increment') !== false) {
@@ -236,11 +213,10 @@ function get_auto_increment_column(mysqli $conn, string $table): ?string {
   return null;
 }
 
-function build_search_where(mysqli $conn, string $field, string $mode, string $term, bool $caseSensitive, array &$paramsOut): string {
+function build_search_where(string $field, string $mode, string $term, bool $caseSensitive, array &$paramsOut): string {
   $fieldEsc = "`" . str_replace('`', '``', $field) . "`";
   $expr = "CAST($fieldEsc AS CHAR)";
   $coll = $caseSensitive ? "utf8mb4_bin" : "utf8mb4_general_ci";
-
   $paramsOut = [];
   $term = (string)$term;
 
@@ -248,9 +224,6 @@ function build_search_where(mysqli $conn, string $field, string $mode, string $t
     case 'exact':
       $paramsOut[] = $term;
       return "$expr COLLATE $coll = ?";
-    case 'like':
-      $paramsOut[] = "%" . $term . "%";
-      return "$expr COLLATE $coll LIKE ?";
     case 'starts':
       $paramsOut[] = $term . "%";
       return "$expr COLLATE $coll LIKE ?";
@@ -259,10 +232,8 @@ function build_search_where(mysqli $conn, string $field, string $mode, string $t
       return "$expr COLLATE $coll LIKE ?";
     case 'regexp':
       $paramsOut[] = $term;
-      if ($caseSensitive) {
-        return "$expr REGEXP BINARY ?";
-      }
-      return "$expr COLLATE $coll REGEXP ?";
+      return $caseSensitive ? "$expr REGEXP BINARY ?" : "$expr COLLATE $coll REGEXP ?";
+    case 'like':
     default:
       $paramsOut[] = "%" . $term . "%";
       return "$expr COLLATE $coll LIKE ?";
@@ -308,7 +279,6 @@ function split_sql_statements(string $sql): array {
   $statements = [];
   $current = '';
   $len = strlen($sql);
-
   $inSingle = false;
   $inDouble = false;
   $inBacktick = false;
@@ -374,8 +344,7 @@ function split_sql_statements(string $sql): array {
       $prev = ($i > 0) ? $sql[$i - 1] : '';
       $after = ($i + 2 < $len) ? $sql[$i + 2] : '';
       if (($i === 0 || $prev === "\n" || $prev === "\r" || ctype_space($prev)) && ($after === '' || ctype_space($after))) {
-        $current .= $ch;
-        $current .= $next;
+        $current .= $ch . $next;
         $i++;
         $inLineComment = true;
         continue;
@@ -389,8 +358,7 @@ function split_sql_statements(string $sql): array {
     }
 
     if ($ch === '/' && $next === '*') {
-      $current .= $ch;
-      $current .= $next;
+      $current .= $ch . $next;
       $i++;
       $inBlockComment = true;
       continue;
@@ -439,32 +407,22 @@ function run_multi_sql(mysqli $conn, string $sqlInput, bool $showAll, int $limit
   $statements = split_sql_statements($sqlInput);
 
   if (empty($statements)) {
-    return [
-      'error' => 'SQL is empty.',
-      'results' => [],
-      'statement_count' => 0
-    ];
+    return ['error' => 'SQL is empty.', 'results' => [], 'statement_count' => 0];
   }
 
   $allSql = implode(";\n", $statements);
 
   if (!$conn->multi_query($allSql)) {
-    return [
-      'error' => $conn->error,
-      'results' => [],
-      'statement_count' => count($statements)
-    ];
+    return ['error' => $conn->error, 'results' => [], 'statement_count' => count($statements)];
   }
 
   $idx = 0;
   do {
     $stmtSql = $statements[$idx] ?? ('Statement #' . ($idx + 1));
-
     if ($res = $conn->store_result()) {
       $fields = $res->fetch_fields();
       $rows = [];
       $fetched = 0;
-
       while ($r = $res->fetch_assoc()) {
         $rows[] = $r;
         $fetched++;
@@ -472,13 +430,11 @@ function run_multi_sql(mysqli $conn, string $sqlInput, bool $showAll, int $limit
           break;
         }
       }
-
       $hasMore = false;
       if (!$showAll && count($rows) > $limit) {
         $hasMore = true;
         array_pop($rows);
       }
-
       $results[] = [
         'sql' => $stmtSql,
         'error' => null,
@@ -491,18 +447,9 @@ function run_multi_sql(mysqli $conn, string $sqlInput, bool $showAll, int $limit
       $res->free();
     } else {
       if ($conn->errno) {
-        $results[] = [
-          'sql' => $stmtSql,
-          'error' => $conn->error,
-          'is_resultset' => false
-        ];
+        $results[] = ['sql' => $stmtSql, 'error' => $conn->error, 'is_resultset' => false];
       } else {
-        $results[] = [
-          'sql' => $stmtSql,
-          'error' => null,
-          'is_resultset' => false,
-          'affected' => $conn->affected_rows
-        ];
+        $results[] = ['sql' => $stmtSql, 'error' => null, 'is_resultset' => false, 'affected' => $conn->affected_rows];
       }
     }
 
@@ -519,11 +466,7 @@ function run_multi_sql(mysqli $conn, string $sqlInput, bool $showAll, int $limit
     }
   }
 
-  return [
-    'error' => null,
-    'results' => $results,
-    'statement_count' => count($statements)
-  ];
+  return ['error' => null, 'results' => $results, 'statement_count' => count($statements)];
 }
 
 function get_table_row_count(mysqli $conn, string $table): int {
@@ -537,20 +480,235 @@ function get_table_row_count(mysqli $conn, string $table): int {
   return 0;
 }
 
-function get_tables_with_row_counts(mysqli $conn): array {
-  $tables = list_tables($conn);
-  $out = [];
-  foreach ($tables as $tbl) {
-    $out[] = [
-      'name' => $tbl,
-      'rows' => get_table_row_count($conn, $tbl)
+function normalize_sql(string $sql): string {
+  $sql = trim($sql);
+  $sql = preg_replace('/^\xEF\xBB\xBF/', '', $sql);
+  $sql = preg_replace('/;+\s*$/', '', $sql);
+  return trim((string)$sql);
+}
+
+// ---------------------------------------------------------------------
+// JSON config
+// ---------------------------------------------------------------------
+function zbdb_load_config(): array {
+  if (!is_file(ZBDB_JSON_FILE)) {
+    return [
+      'connections' => [],
+      'dbs' => []
     ];
+  }
+
+  $raw = @file_get_contents(ZBDB_JSON_FILE);
+  if ($raw === false || trim($raw) === '') {
+    return [
+      'connections' => [],
+      'dbs' => []
+    ];
+  }
+
+  $data = json_decode($raw, true);
+  if (!is_array($data)) {
+    return [
+      'connections' => [],
+      'dbs' => []
+    ];
+  }
+
+  if (!isset($data['connections']) || !is_array($data['connections'])) {
+    $data['connections'] = [];
+  }
+  if (!isset($data['dbs']) || !is_array($data['dbs'])) {
+    $data['dbs'] = [];
+  }
+
+  return $data;
+}
+
+function zbdb_save_config(array $cfg): bool {
+  $json = json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+  if ($json === false) {
+    return false;
+  }
+  return @file_put_contents(ZBDB_JSON_FILE, $json, LOCK_EX) !== false;
+}
+
+function zbdb_db_key(string $host, string $user, string $db): string {
+  return $host . '|' . $user . '|' . $db;
+}
+
+function zbdb_current_db_key(): string {
+  return zbdb_db_key(
+    (string)($_SESSION['db_host'] ?? ''),
+    (string)($_SESSION['db_user'] ?? ''),
+    (string)($_SESSION['db_name'] ?? '')
+  );
+}
+
+function zbdb_ensure_db_entry(array &$cfg, string $dbKey): void {
+  if (!isset($cfg['dbs'][$dbKey]) || !is_array($cfg['dbs'][$dbKey])) {
+    $cfg['dbs'][$dbKey] = [];
+  }
+  if (!isset($cfg['dbs'][$dbKey]['table_order']) || !is_array($cfg['dbs'][$dbKey]['table_order'])) {
+    $cfg['dbs'][$dbKey]['table_order'] = [];
+  }
+  if (!isset($cfg['dbs'][$dbKey]['column_orders']) || !is_array($cfg['dbs'][$dbKey]['column_orders'])) {
+    $cfg['dbs'][$dbKey]['column_orders'] = [];
+  }
+}
+
+function zbdb_add_connection_no_password(string $host, string $user, string $db): void {
+  $cfg = zbdb_load_config();
+
+  $found = false;
+  foreach ($cfg['connections'] as $row) {
+    if (
+      is_array($row) &&
+      (string)($row['host'] ?? '') === $host &&
+      (string)($row['user'] ?? '') === $user &&
+      (string)($row['db'] ?? '') === $db
+    ) {
+      $found = true;
+      break;
+    }
+  }
+
+  if (!$found) {
+    $cfg['connections'][] = [
+      'host' => $host,
+      'user' => $user,
+      'db' => $db
+    ];
+  }
+
+  $dbKey = zbdb_db_key($host, $user, $db);
+  zbdb_ensure_db_entry($cfg, $dbKey);
+  zbdb_save_config($cfg);
+}
+
+function zbdb_get_saved_connections(): array {
+  $cfg = zbdb_load_config();
+  return $cfg['connections'];
+}
+
+function zbdb_get_table_order(string $dbKey): array {
+  $cfg = zbdb_load_config();
+  return isset($cfg['dbs'][$dbKey]['table_order']) && is_array($cfg['dbs'][$dbKey]['table_order'])
+    ? $cfg['dbs'][$dbKey]['table_order']
+    : [];
+}
+
+function zbdb_get_column_order(string $dbKey, string $table): array {
+  $cfg = zbdb_load_config();
+  return isset($cfg['dbs'][$dbKey]['column_orders'][$table]) && is_array($cfg['dbs'][$dbKey]['column_orders'][$table])
+    ? $cfg['dbs'][$dbKey]['column_orders'][$table]
+    : [];
+}
+
+function sort_by_saved_order(array $items, array $savedOrder): array {
+  if (empty($savedOrder)) {
+    return $items;
+  }
+
+  $map = [];
+  foreach ($items as $item) {
+    $map[(string)$item] = $item;
+  }
+
+  $out = [];
+  foreach ($savedOrder as $name) {
+    $name = (string)$name;
+    if (array_key_exists($name, $map)) {
+      $out[] = $map[$name];
+      unset($map[$name]);
+    }
+  }
+
+  foreach ($items as $item) {
+    $name = (string)$item;
+    if (array_key_exists($name, $map)) {
+      $out[] = $map[$name];
+      unset($map[$name]);
+    }
+  }
+
+  return $out;
+}
+
+function reorder_assoc_row_by_columns(array $row, array $columnOrder): array {
+  if (empty($columnOrder)) {
+    return $row;
+  }
+
+  $out = [];
+  foreach ($columnOrder as $col) {
+    if (array_key_exists($col, $row)) {
+      $out[$col] = $row[$col];
+    }
+  }
+  foreach ($row as $k => $v) {
+    if (!array_key_exists($k, $out)) {
+      $out[$k] = $v;
+    }
   }
   return $out;
 }
 
-function build_browse_url(array $params): string {
-  return $_SERVER['PHP_SELF'] . '?' . http_build_query($params);
+function reorder_describe_columns(array $cols, array $savedOrder): array {
+  if (empty($savedOrder)) {
+    return $cols;
+  }
+
+  $map = [];
+  foreach ($cols as $c) {
+    $map[(string)$c['Field']] = $c;
+  }
+
+  $out = [];
+  foreach ($savedOrder as $name) {
+    if (isset($map[$name])) {
+      $out[] = $map[$name];
+      unset($map[$name]);
+    }
+  }
+
+  foreach ($cols as $c) {
+    $name = (string)$c['Field'];
+    if (isset($map[$name])) {
+      $out[] = $map[$name];
+      unset($map[$name]);
+    }
+  }
+
+  return $out;
+}
+
+function reorder_field_objects(array $fieldObjects, array $savedOrder): array {
+  if (empty($savedOrder)) {
+    return $fieldObjects;
+  }
+
+  $map = [];
+  foreach ($fieldObjects as $f) {
+    $map[(string)$f->name] = $f;
+  }
+
+  $out = [];
+  foreach ($savedOrder as $name) {
+    if (isset($map[$name])) {
+      $out[] = $map[$name];
+      unset($map[$name]);
+    }
+  }
+
+  foreach ($fieldObjects as $f) {
+    $name = (string)$f->name;
+    if (isset($map[$name])) {
+      $out[] = $map[$name];
+      unset($map[$name]);
+    }
+  }
+
+  return $out;
 }
 
 function make_browse_params(
@@ -562,7 +720,9 @@ function make_browse_params(
   bool $s_cs,
   bool $browse_desc,
   string $pageLength,
-  int $page
+  int $page,
+  string $orderBy,
+  string $orderDir
 ): array {
   $params = [
     'action' => 'browse',
@@ -585,11 +745,27 @@ function make_browse_params(
     $params['browse_desc'] = 1;
   }
 
+  if ($orderBy !== '') {
+    $params['order_by'] = $orderBy;
+    $params['order_dir'] = $orderDir;
+  }
+
   return $params;
 }
 
+function build_browse_url(array $params): string {
+  return $_SERVER['PHP_SELF'] . '?' . http_build_query($params);
+}
+
+function get_next_sort_dir(string $currentOrderBy, string $currentOrderDir, string $clickedColumn): string {
+  if ($currentOrderBy !== $clickedColumn) {
+    return 'asc';
+  }
+  return strtolower($currentOrderDir) === 'asc' ? 'desc' : 'asc';
+}
+
 // ---------------------------------------------------------------------
-// Handle actions (login/logout)
+// Actions
 // ---------------------------------------------------------------------
 $action = $_GET['action'] ?? '';
 
@@ -617,13 +793,12 @@ if ($action === 'login' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $login_error = 'Connection failed: ' . $test->connect_error;
   } else {
     $test->close();
-
     session_regenerate_id(true);
     $_SESSION['db_host'] = $host;
     $_SESSION['db_user'] = $user;
     $_SESSION['db_pass'] = $pass;
     $_SESSION['db_name'] = $db;
-
+    zbdb_add_connection_no_password($host, $user, $db);
     redirect();
   }
 }
@@ -642,12 +817,80 @@ if (is_logged_in()) {
 }
 
 [$flash_message, $flash_error] = flash_get();
-
-// ---------------------------------------------------------------------
-// DB actions
-// ---------------------------------------------------------------------
 $sql_console_result = null;
 
+// ---------------------------------------------------------------------
+// AJAX config save
+// ---------------------------------------------------------------------
+if ($conn && $action === 'save_config' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+  csrf_check();
+
+  $section = (string)($_POST['section'] ?? '');
+  $items = $_POST['items'] ?? [];
+  if (!is_array($items)) {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => false, 'error' => 'Invalid items.']);
+    exit;
+  }
+
+  $cfg = zbdb_load_config();
+  $dbKey = zbdb_current_db_key();
+  zbdb_ensure_db_entry($cfg, $dbKey);
+
+  if ($section === 'table_order') {
+    $valid = list_tables($conn);
+    $clean = [];
+    foreach ($items as $it) {
+      $it = (string)$it;
+      if (in_array($it, $valid, true) && !in_array($it, $clean, true)) {
+        $clean[] = $it;
+      }
+    }
+    foreach ($valid as $it) {
+      if (!in_array($it, $clean, true)) {
+        $clean[] = $it;
+      }
+    }
+    $cfg['dbs'][$dbKey]['table_order'] = $clean;
+  } elseif ($section === 'column_order') {
+    $table = (string)($_POST['table'] ?? '');
+    if ($table === '' || !table_exists($conn, $table)) {
+      header('Content-Type: application/json; charset=utf-8');
+      echo json_encode(['ok' => false, 'error' => 'Invalid table.']);
+      exit;
+    }
+    $cols = describe_table($conn, $table);
+    $valid = array_map(function ($c) {
+      return (string)$c['Field'];
+    }, $cols);
+    $clean = [];
+    foreach ($items as $it) {
+      $it = (string)$it;
+      if (in_array($it, $valid, true) && !in_array($it, $clean, true)) {
+        $clean[] = $it;
+      }
+    }
+    foreach ($valid as $it) {
+      if (!in_array($it, $clean, true)) {
+        $clean[] = $it;
+      }
+    }
+    $cfg['dbs'][$dbKey]['column_orders'][$table] = $clean;
+  } else {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => false, 'error' => 'Invalid config section.']);
+    exit;
+  }
+
+  $ok = zbdb_save_config($cfg);
+  header('Content-Type: application/json; charset=utf-8');
+  echo json_encode(['ok' => $ok, 'error' => $ok ? null : 'Could not save zbdb.json']);
+  exit;
+}
+
+// ---------------------------------------------------------------------
+// DB mutations + export + SQL
+// ---------------------------------------------------------------------
 if ($conn) {
   if ($action === 'add_column' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
@@ -802,7 +1045,6 @@ if ($conn) {
     }
 
     $is_update = (!empty($_POST['is_update']) && $_POST['is_update'] === '1');
-
     $columnsInfo = describe_table($conn, $table);
     $allowedCols = array_map(function ($c) {
       return (string)$c['Field'];
@@ -838,8 +1080,8 @@ if ($conn) {
         set_flash("Update not possible (missing PK).", true);
         redirect(['action' => 'browse', 'table' => $table]);
       }
-      $pkValue = (string)$_POST['pk_value'];
 
+      $pkValue = (string)$_POST['pk_value'];
       $setParts = [];
       foreach ($cols as $colName) {
         $setParts[] = "`" . str_replace('`', '``', $colName) . "` = ?";
@@ -863,7 +1105,6 @@ if ($conn) {
       } else {
         set_flash("Update failed: " . $stmt->error, true);
       }
-
       $stmt->close();
       redirect(['action' => 'browse', 'table' => $table]);
     } else {
@@ -893,7 +1134,6 @@ if ($conn) {
       } else {
         set_flash("Insert failed: " . $stmt->error, true);
       }
-
       $stmt->close();
       redirect(['action' => 'browse', 'table' => $table]);
     }
@@ -930,7 +1170,6 @@ if ($conn) {
       set_flash("Delete failed: " . $stmt->error, true);
     }
     $stmt->close();
-
     redirect(['action' => 'browse', 'table' => $table]);
   }
 
@@ -1035,7 +1274,6 @@ if ($conn) {
       foreach ($tables as $table) {
         fwrite($out, "# TABLE: {$table}\n");
         $escTable = str_replace('`', '``', $table);
-
         $res = $conn->query("SELECT * FROM `{$escTable}`");
         if ($res) {
           $cols = [];
@@ -1081,8 +1319,8 @@ if ($conn) {
 
     $sqlIn = (string)($_POST['sql'] ?? '');
     $showAll = !empty($_POST['show_all']);
-
     $sql = trim($sqlIn);
+
     if ($sql === '') {
       set_flash("SQL is empty.", true);
       redirect(['action' => 'sql']);
@@ -1098,6 +1336,8 @@ if ($conn) {
 // ---------------------------------------------------------------------
 // HTML
 // ---------------------------------------------------------------------
+$savedConnections = zbdb_get_saved_connections();
+$dbKeyCurrent = is_logged_in() ? zbdb_current_db_key() : '';
 ?><!doctype html>
 <html lang="en">
 <head>
@@ -1115,6 +1355,13 @@ if ($conn) {
     textarea.form-control-sm { min-height: 110px; }
     .type-builder-group { border: 1px solid #dee2e6; border-radius: .25rem; padding: .5rem .75rem; background-color: #fff; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .drag-handle { cursor: move; }
+    .sortable-row.dragging,
+    .sortable-col.dragging { opacity: .35; }
+    .drop-zone-over { outline: 2px dashed #0d6efd; outline-offset: -2px; }
+    .sort-link { color: inherit; text-decoration: none; }
+    .sort-link:hover { text-decoration: underline; }
+    .table-order-badge { min-width: 70px; text-align: center; }
   </style>
 </head>
 <body>
@@ -1154,7 +1401,7 @@ if ($conn) {
 <?php if (!is_logged_in() || !$conn): ?>
 
   <div class="row justify-content-center">
-    <div class="col-md-6">
+    <div class="col-md-7">
       <div class="card shadow-sm">
         <div class="card-header">
           <strong><i class="fa-solid fa-right-to-bracket"></i> Database Login</strong>
@@ -1163,23 +1410,43 @@ if ($conn) {
           <?php if ($login_error): ?>
             <div class="alert alert-danger"><?php echo h($login_error); ?></div>
           <?php endif; ?>
+
+          <?php if (!empty($savedConnections)): ?>
+            <div class="mb-3">
+              <label class="form-label">Saved connections (password not saved)</label>
+              <select id="savedConnectionSelect" class="form-select">
+                <option value="">Select...</option>
+                <?php foreach ($savedConnections as $connRow): ?>
+                  <?php
+                    $host = (string)($connRow['host'] ?? '');
+                    $user = (string)($connRow['user'] ?? '');
+                    $db = (string)($connRow['db'] ?? '');
+                  ?>
+                  <option
+                    value="<?php echo h($host . '||' . $user . '||' . $db); ?>"
+                  ><?php echo h($host . ' / ' . $user . ' / ' . $db); ?></option>
+                <?php endforeach; ?>
+              </select>
+            </div>
+          <?php endif; ?>
+
           <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=login">
             <?php echo csrf_field(); ?>
             <div class="mb-3">
               <label class="form-label">Host</label>
-              <input type="text" name="host" class="form-control" value="localhost">
+              <input type="text" name="host" id="loginHost" class="form-control" value="localhost">
             </div>
             <div class="mb-3">
               <label class="form-label">User</label>
-              <input type="text" name="user" class="form-control" required>
+              <input type="text" name="user" id="loginUser" class="form-control" required>
             </div>
             <div class="mb-3">
               <label class="form-label">Password</label>
-              <input type="password" name="pass" class="form-control">
+              <input type="password" name="pass" id="loginPass" class="form-control">
             </div>
             <div class="mb-3">
               <label class="form-label">Database</label>
-              <input type="text" name="db" class="form-control" required>
+              <input type="text" name="db" id="loginDb" class="form-control" required>
             </div>
             <button type="submit" class="btn btn-primary">
               <i class="fa-solid fa-circle-arrow-right"></i> Connect
@@ -1195,6 +1462,9 @@ if ($conn) {
   $action = $action ?: 'tables';
   $currentTable = (string)($_GET['table'] ?? '');
 
+  // ---------------------------------------------------
+  // SQL
+  // ---------------------------------------------------
   if ($action === 'sql') {
     $sqlPrefill = (string)($_POST['sql'] ?? ($_GET['sql'] ?? ''));
     ?>
@@ -1228,9 +1498,7 @@ if ($conn) {
     <?php if ($sql_console_result !== null): ?>
       <?php if (!empty($sql_console_result['error'])): ?>
         <div class="card shadow-sm">
-          <div class="card-header">
-            <strong>Result</strong>
-          </div>
+          <div class="card-header"><strong>Result</strong></div>
           <div class="card-body">
             <div class="mb-2">
               <div class="small text-muted">SQL:</div>
@@ -1248,9 +1516,7 @@ if ($conn) {
 
         <?php foreach (($sql_console_result['results'] ?? []) as $i => $resItem): ?>
           <div class="card shadow-sm mb-3">
-            <div class="card-header">
-              <strong>Statement <?php echo (int)($i + 1); ?></strong>
-            </div>
+            <div class="card-header"><strong>Statement <?php echo (int)($i + 1); ?></strong></div>
             <div class="card-body">
               <div class="mb-2">
                 <div class="small text-muted">SQL:</div>
@@ -1272,21 +1538,15 @@ if ($conn) {
                     $rows = $resItem['rows'] ?? [];
                     $hasMore = !empty($resItem['has_more']);
                   ?>
-
                   <?php if ($hasMore): ?>
                     <div class="alert alert-warning d-flex justify-content-between align-items-center">
                       <div>
                         Displaying the first <?php echo (int)$limit; ?> rows.
-                        Loading the entire result set may be slow and could use significant memory.
                       </div>
-                      <button class="btn btn-sm btn-outline-dark" onclick="runSqlShowAll(); return false;">
-                        Show all rows
-                      </button>
+                      <button class="btn btn-sm btn-outline-dark" onclick="runSqlShowAll(); return false;">Show all rows</button>
                     </div>
                   <?php else: ?>
-                    <div class="alert alert-success">
-                      Query returned <?php echo count($rows); ?> row(s).
-                    </div>
+                    <div class="alert alert-success">Query returned <?php echo count($rows); ?> row(s).</div>
                   <?php endif; ?>
 
                   <div class="table-responsive">
@@ -1316,12 +1576,16 @@ if ($conn) {
         <?php endforeach; ?>
       <?php endif; ?>
     <?php endif; ?>
-
     <?php
   }
 
+  // ---------------------------------------------------
+  // Export
+  // ---------------------------------------------------
   if ($action === 'export') {
     $tables = list_tables($conn);
+    $savedTableOrder = zbdb_get_table_order($dbKeyCurrent);
+    $tables = sort_by_saved_order($tables, $savedTableOrder);
     ?>
     <div class="card shadow-sm">
       <div class="card-header">
@@ -1330,7 +1594,6 @@ if ($conn) {
       <div class="card-body">
         <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=do_export">
           <?php echo csrf_field(); ?>
-
           <div class="mb-3">
             <label class="form-label">Select tables</label>
             <div class="mb-2">
@@ -1353,7 +1616,7 @@ if ($conn) {
             <label class="form-label">Format</label>
             <div class="form-check">
               <input class="form-check-input" type="radio" name="format" id="fmt_sql" value="sql" checked>
-              <label class="form-check-label" for="fmt_sql">MySQL SQL (DDL + optional INSERTs)</label>
+              <label class="form-check-label" for="fmt_sql">MySQL SQL</label>
             </div>
             <div class="form-check">
               <input class="form-check-input" type="radio" name="format" id="fmt_csv" value="csv">
@@ -1382,8 +1645,18 @@ if ($conn) {
     <?php
   }
 
+  // ---------------------------------------------------
+  // Tables
+  // ---------------------------------------------------
   if ($action === 'tables') {
-    $tablesWithCounts = get_tables_with_row_counts($conn);
+    $tables = list_tables($conn);
+    $savedTableOrder = zbdb_get_table_order($dbKeyCurrent);
+    $tables = sort_by_saved_order($tables, $savedTableOrder);
+
+    $tableRows = [];
+    foreach ($tables as $tbl) {
+      $tableRows[$tbl] = get_table_row_count($conn, $tbl);
+    }
     ?>
     <div class="card shadow-sm">
       <div class="card-header d-flex justify-content-between align-items-center">
@@ -1398,16 +1671,23 @@ if ($conn) {
         </div>
       </div>
       <div class="card-body">
-        <div class="list-group">
-          <?php foreach ($tablesWithCounts as $item): ?>
-            <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($item['name'])); ?>"
-               class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
-              <span><i class="fa-regular fa-square"></i> <?php echo h($item['name']); ?></span>
-              <span>
-                <span class="badge bg-secondary rounded-pill me-2"><?php echo number_format((int)$item['rows']); ?> rows</span>
-                <span class="badge bg-secondary rounded-pill">Browse</span>
-              </span>
-            </a>
+        <div class="alert alert-secondary">
+          Drag and drop the tables to change the order. It is saved in <code>zbdb.json</code>.
+        </div>
+
+        <div class="list-group sortable-table-list" data-save-section="table_order">
+          <?php foreach ($tables as $tbl): ?>
+            <div class="list-group-item d-flex justify-content-between align-items-center sortable-row" draggable="true" data-item="<?php echo h($tbl); ?>">
+              <div class="d-flex align-items-center gap-2">
+                <span class="drag-handle"><i class="fa-solid fa-grip-vertical"></i></span>
+                <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($tbl)); ?>" class="text-decoration-none">
+                  <?php echo h($tbl); ?>
+                </a>
+              </div>
+              <div>
+                <span class="badge bg-secondary rounded-pill table-order-badge"><?php echo number_format((int)$tableRows[$tbl]); ?> rows</span>
+              </div>
+            </div>
           <?php endforeach; ?>
         </div>
       </div>
@@ -1415,17 +1695,23 @@ if ($conn) {
     <?php
   }
 
+  // ---------------------------------------------------
+  // Browse
+  // ---------------------------------------------------
   if ($action === 'browse' && $currentTable !== '') {
     $table = $currentTable;
     if (!table_exists($conn, $table)) {
       echo '<div class="alert alert-danger">Invalid table.</div>';
     } else {
+      $savedColumnOrder = zbdb_get_column_order($dbKeyCurrent, $table);
+
       $columns = describe_table($conn, $table);
+      $columns = reorder_describe_columns($columns, $savedColumnOrder);
       $fieldsList = array_map(function ($c) {
         return (string)$c['Field'];
       }, $columns);
-      $defaultField = $fieldsList[0] ?? '';
 
+      $defaultField = $fieldsList[0] ?? '';
       $s_enabled = !empty($_GET['s_enabled']);
       $s_field = (string)($_GET['s_field'] ?? $defaultField);
       $s_mode = (string)($_GET['s_mode'] ?? 'like');
@@ -1444,15 +1730,23 @@ if ($conn) {
         $page = 1;
       }
 
+      $orderBy = (string)($_GET['order_by'] ?? '');
+      $orderDir = strtolower((string)($_GET['order_dir'] ?? 'asc'));
+      if (!in_array($orderDir, ['asc', 'desc'], true)) {
+        $orderDir = 'asc';
+      }
+      if ($orderBy !== '' && !in_array($orderBy, $fieldsList, true)) {
+        $orderBy = '';
+      }
+
       $showAllRecords = ($pageLength === 'all');
       $perPage = $showAllRecords ? 0 : (int)$pageLength;
-
       $hasWhere = false;
       $whereSql = '';
       $params = [];
 
       if ($s_enabled && $s_field !== '' && in_array($s_field, $fieldsList, true) && $s_term !== '') {
-        $whereSql = build_search_where($conn, $s_field, $s_mode, $s_term, $s_cs, $params);
+        $whereSql = build_search_where($s_field, $s_mode, $s_term, $s_cs, $params);
         $hasWhere = true;
       }
 
@@ -1485,7 +1779,6 @@ if ($conn) {
       }
 
       $offset = $showAllRecords ? 0 : (($page - 1) * $perPage);
-
       $rows = [];
       $autoIncrementField = get_auto_increment_column($conn, $table);
 
@@ -1494,7 +1787,9 @@ if ($conn) {
         $sql .= " WHERE $whereSql";
       }
 
-      if ($browse_desc && $autoIncrementField !== null) {
+      if ($orderBy !== '') {
+        $sql .= " ORDER BY `" . str_replace('`', '``', $orderBy) . "` " . strtoupper($orderDir);
+      } elseif ($browse_desc && $autoIncrementField !== null) {
         $sql .= " ORDER BY `" . str_replace('`', '``', $autoIncrementField) . "` DESC";
       }
 
@@ -1520,6 +1815,7 @@ if ($conn) {
             $meta->free();
           }
 
+          $fields = reorder_field_objects($fields, $savedColumnOrder);
           $rows = stmt_fetch_all_assoc($stmt, $fieldNames, 0);
           $stmt->close();
         } else {
@@ -1530,6 +1826,7 @@ if ($conn) {
         $fields = [];
         if ($res) {
           $fields = $res->fetch_fields();
+          $fields = reorder_field_objects($fields, $savedColumnOrder);
           while ($r = $res->fetch_assoc()) {
             $rows[] = $r;
           }
@@ -1537,25 +1834,24 @@ if ($conn) {
         }
       }
 
+      foreach ($rows as $k => $r) {
+        $rows[$k] = reorder_assoc_row_by_columns($r, $savedColumnOrder);
+      }
+
       $pk = get_primary_key($conn, $table);
 
-      $baseParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, $page);
+      $baseParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, $page, $orderBy, $orderDir);
 
-      $descParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, true, $pageLength, 1);
+      $descParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, true, $pageLength, 1, '', 'asc');
       $browseDescUrl = build_browse_url($descParams);
 
-      $normalParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, false, $pageLength, 1);
+      $normalParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, false, $pageLength, 1, $orderBy, $orderDir);
       $normalBrowseUrl = build_browse_url($normalParams);
 
-      $firstPageParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, 1);
-      $prevPageParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, max(1, $page - 1));
-      $nextPageParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, min($totalPages, $page + 1));
-      $lastPageParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, $totalPages);
-
-      $firstPageUrl = build_browse_url($firstPageParams);
-      $prevPageUrl = build_browse_url($prevPageParams);
-      $nextPageUrl = build_browse_url($nextPageParams);
-      $lastPageUrl = build_browse_url($lastPageParams);
+      $firstPageUrl = build_browse_url(make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, 1, $orderBy, $orderDir));
+      $prevPageUrl = build_browse_url(make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, max(1, $page - 1), $orderBy, $orderDir));
+      $nextPageUrl = build_browse_url(make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, min($totalPages, $page + 1), $orderBy, $orderDir));
+      $lastPageUrl = build_browse_url(make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, $browse_desc, $pageLength, $totalPages, $orderBy, $orderDir));
 
       $startRow = $count > 0 ? ($showAllRecords ? 1 : ($offset + 1)) : 0;
       $endRow = $count > 0 ? ($showAllRecords ? $count : min($offset + count($rows), $count)) : 0;
@@ -1564,8 +1860,7 @@ if ($conn) {
         <a href="<?php echo h($_SERVER['PHP_SELF']); ?>" class="btn btn-secondary btn-sm">
           <i class="fa-solid fa-arrow-left"></i> Tables
         </a>
-        <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=structure&amp;table=<?php echo h(urlencode($table)); ?>"
-           class="btn btn-outline-primary btn-sm">
+        <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=structure&amp;table=<?php echo h(urlencode($table)); ?>" class="btn btn-outline-primary btn-sm">
           <i class="fa-solid fa-sitemap"></i> Structure
         </a>
         <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=sql" class="btn btn-outline-warning btn-sm">
@@ -1599,6 +1894,10 @@ if ($conn) {
             <?php if ($browse_desc): ?>
               <input type="hidden" name="browse_desc" value="1">
             <?php endif; ?>
+            <?php if ($orderBy !== ''): ?>
+              <input type="hidden" name="order_by" value="<?php echo h($orderBy); ?>">
+              <input type="hidden" name="order_dir" value="<?php echo h($orderDir); ?>">
+            <?php endif; ?>
             <input type="hidden" name="page" value="1">
 
             <div class="col-md-3">
@@ -1616,7 +1915,7 @@ if ($conn) {
               <label class="form-label small">Match</label>
               <select name="s_mode" class="form-select form-select-sm">
                 <option value="exact" <?php echo $s_mode === 'exact' ? 'selected' : ''; ?>>Exact</option>
-                <option value="like" <?php echo $s_mode === 'like' ? 'selected' : ''; ?>>Contains (LIKE %...%)</option>
+                <option value="like" <?php echo $s_mode === 'like' ? 'selected' : ''; ?>>Contains</option>
                 <option value="starts" <?php echo $s_mode === 'starts' ? 'selected' : ''; ?>>Starts with</option>
                 <option value="ends" <?php echo $s_mode === 'ends' ? 'selected' : ''; ?>>Ends with</option>
                 <option value="regexp" <?php echo $s_mode === 'regexp' ? 'selected' : ''; ?>>REGEXP</option>
@@ -1653,14 +1952,17 @@ if ($conn) {
             </div>
 
             <div class="col-12">
-              <a class="btn btn-outline-secondary btn-sm"
-                 href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($table)); ?>">
+              <a class="btn btn-outline-secondary btn-sm" href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($table)); ?>">
                 Clear search
               </a>
             </div>
           </form>
 
-          <?php if ($browse_desc && $autoIncrementField !== null): ?>
+          <div class="alert alert-secondary">
+            Drag and drop the column headers to reorder the columns. The order is saved in <code>zbdb.json</code>.
+          </div>
+
+          <?php if ($browse_desc && $autoIncrementField !== null && $orderBy === ''): ?>
             <div class="alert alert-secondary">
               Ordered by <strong><?php echo h($autoIncrementField); ?></strong> DESC.
             </div>
@@ -1668,7 +1970,7 @@ if ($conn) {
 
           <?php if ($showAllRecords): ?>
             <div class="alert alert-warning">
-              Showing all matching rows. This can be slow and memory intensive on large tables.
+              Showing all matching rows.
             </div>
           <?php endif; ?>
 
@@ -1717,6 +2019,10 @@ if ($conn) {
                 <?php if ($browse_desc): ?>
                   <input type="hidden" name="browse_desc" value="1">
                 <?php endif; ?>
+                <?php if ($orderBy !== ''): ?>
+                  <input type="hidden" name="order_by" value="<?php echo h($orderBy); ?>">
+                  <input type="hidden" name="order_dir" value="<?php echo h($orderDir); ?>">
+                <?php endif; ?>
                 <input type="hidden" name="page_length" value="<?php echo h($pageLength); ?>">
                 <label class="small mb-0">Page</label>
                 <input type="number" name="page" min="1" max="<?php echo (int)$totalPages; ?>" value="<?php echo (int)$page; ?>" class="form-control form-control-sm" style="width:90px;">
@@ -1729,11 +2035,30 @@ if ($conn) {
             <p class="mb-0">No rows found.</p>
           <?php else: ?>
             <div class="table-responsive">
-              <table class="table table-sm table-bordered table-striped table-fixed">
+              <table class="table table-sm table-bordered table-striped table-fixed" id="browseTable">
                 <thead class="table-light">
-                  <tr>
+                  <tr id="browseColumnsRow" data-table="<?php echo h($table); ?>">
                     <?php foreach ($fields as $f): ?>
-                      <th><?php echo h($f->name); ?></th>
+                      <?php
+                        $fname = (string)$f->name;
+                        $nextDir = get_next_sort_dir($orderBy, $orderDir, $fname);
+                        $sortParams = make_browse_params($table, $s_enabled, $s_field, $s_mode, $s_term, $s_cs, false, $pageLength, 1, $fname, $nextDir);
+                        $sortUrl = build_browse_url($sortParams);
+                        $icon = '<i class="fa-solid fa-sort text-muted"></i>';
+                        if ($orderBy === $fname && $orderDir === 'asc') {
+                          $icon = '<i class="fa-solid fa-sort-up"></i>';
+                        } elseif ($orderBy === $fname && $orderDir === 'desc') {
+                          $icon = '<i class="fa-solid fa-sort-down"></i>';
+                        }
+                      ?>
+                      <th class="sortable-col" draggable="true" data-column="<?php echo h($fname); ?>">
+                        <div class="d-flex align-items-center justify-content-between gap-2">
+                          <span class="drag-handle"><i class="fa-solid fa-grip-vertical"></i></span>
+                          <a class="sort-link flex-grow-1" href="<?php echo h($sortUrl); ?>">
+                            <?php echo h($fname); ?> <?php echo $icon; ?>
+                          </a>
+                        </div>
+                      </th>
                     <?php endforeach; ?>
                     <th style="width:130px;">Actions</th>
                   </tr>
@@ -1746,13 +2071,10 @@ if ($conn) {
                       <?php endforeach; ?>
                       <td class="d-flex gap-1">
                         <?php if ($pk !== null && isset($row[$pk])): ?>
-                          <a class="btn btn-sm btn-primary"
-                             href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=edit_row&amp;table=<?php echo h(urlencode($table)); ?>&amp;pk_value=<?php echo h(urlencode((string)$row[$pk])); ?>">
+                          <a class="btn btn-sm btn-primary" href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=edit_row&amp;table=<?php echo h(urlencode($table)); ?>&amp;pk_value=<?php echo h(urlencode((string)$row[$pk])); ?>">
                             <i class="fa-solid fa-pen"></i>
                           </a>
-
-                          <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=delete_row" class="d-inline"
-                                onsubmit="return confirm('Delete this row?');">
+                          <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=delete_row" class="d-inline" onsubmit="return confirm('Delete this row?');">
                             <?php echo csrf_field(); ?>
                             <input type="hidden" name="table" value="<?php echo h($table); ?>">
                             <input type="hidden" name="pk" value="<?php echo h($pk); ?>">
@@ -1780,9 +2102,7 @@ if ($conn) {
                 <a class="btn btn-sm btn-outline-secondary <?php echo $page >= $totalPages ? 'disabled' : ''; ?>" href="<?php echo h($nextPageUrl); ?>">Next</a>
                 <a class="btn btn-sm btn-outline-secondary <?php echo $page >= $totalPages ? 'disabled' : ''; ?>" href="<?php echo h($lastPageUrl); ?>">Last</a>
               </div>
-              <div class="small text-muted">
-                Page <?php echo (int)$page; ?> of <?php echo (int)$totalPages; ?>
-              </div>
+              <div class="small text-muted">Page <?php echo (int)$page; ?> of <?php echo (int)$totalPages; ?></div>
             </div>
           <?php endif; ?>
 
@@ -1820,8 +2140,7 @@ if ($conn) {
                       echo '<option value="__NULL__">(NULL)</option>';
                     }
                     foreach ($enumVals as $v) {
-                      $hv = h($v);
-                      echo '<option value="' . $hv . '">' . $hv . '</option>';
+                      echo '<option value="' . h($v) . '">' . h($v) . '</option>';
                     }
                     echo '</select>';
                   } elseif (preg_match('/^(tinyint|smallint|mediumint|int|bigint)\b/i', $typeLow)) {
@@ -1855,6 +2174,9 @@ if ($conn) {
     }
   }
 
+  // ---------------------------------------------------
+  // Edit
+  // ---------------------------------------------------
   if ($action === 'edit_row' && $currentTable !== '' && isset($_GET['pk_value'])) {
     $table = $currentTable;
     if (!table_exists($conn, $table)) {
@@ -1866,6 +2188,8 @@ if ($conn) {
       if ($pk === null) {
         echo '<div class="alert alert-danger">Cannot edit: table has no single-column primary key.</div>';
       } else {
+        $savedColumnOrder = zbdb_get_column_order($dbKeyCurrent, $table);
+
         $sql = "SELECT * FROM `" . str_replace('`', '``', $table) . "` WHERE `" . str_replace('`', '``', $pk) . "` = ? LIMIT 1";
         $stmt = $conn->prepare($sql);
         $row = null;
@@ -1885,6 +2209,9 @@ if ($conn) {
           $rows = stmt_fetch_all_assoc($stmt, $fieldNames, 1);
           $stmt->close();
           $row = $rows[0] ?? null;
+          if ($row) {
+            $row = reorder_assoc_row_by_columns($row, $savedColumnOrder);
+          }
         }
 
         if (!$row) {
@@ -1898,10 +2225,11 @@ if ($conn) {
             }
             $infoRes->free();
           }
+
+          $orderedColNames = array_keys($row);
           ?>
           <div class="mb-3">
-            <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($table)); ?>"
-               class="btn btn-secondary btn-sm">
+            <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($table)); ?>" class="btn btn-secondary btn-sm">
               <i class="fa-solid fa-arrow-left"></i> Back to browse
             </a>
           </div>
@@ -1917,7 +2245,7 @@ if ($conn) {
                 <input type="hidden" name="pk_value" value="<?php echo h($pkValue); ?>">
 
                 <div class="row g-2">
-                  <?php foreach (array_keys($row) as $col):
+                  <?php foreach ($orderedColNames as $col):
                     $val = $row[$col];
                     $typeDef = (string)($colInfo[$col]['Type'] ?? 'text');
                     $typeLow = strtolower($typeDef);
@@ -1982,16 +2310,20 @@ if ($conn) {
     }
   }
 
+  // ---------------------------------------------------
+  // Structure
+  // ---------------------------------------------------
   if ($action === 'structure' && $currentTable !== '') {
     $table = $currentTable;
     if (!table_exists($conn, $table)) {
       echo '<div class="alert alert-danger">Invalid table.</div>';
     } else {
+      $savedColumnOrder = zbdb_get_column_order($dbKeyCurrent, $table);
       $cols = describe_table($conn, $table);
+      $cols = reorder_describe_columns($cols, $savedColumnOrder);
       ?>
       <div class="mb-3">
-        <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($table)); ?>"
-           class="btn btn-secondary btn-sm">
+        <a href="<?php echo h($_SERVER['PHP_SELF']); ?>?action=browse&amp;table=<?php echo h(urlencode($table)); ?>" class="btn btn-secondary btn-sm">
           <i class="fa-solid fa-arrow-left"></i> Back to browse
         </a>
       </div>
@@ -2024,8 +2356,7 @@ if ($conn) {
                     <td><?php echo h($def); ?></td>
                     <td><?php echo h((string)$c['Extra']); ?></td>
                     <td class="d-flex gap-1 flex-wrap">
-                      <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=drop_column" class="d-inline"
-                            onsubmit="return confirm('Drop column <?php echo h($field); ?>?');">
+                      <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=drop_column" class="d-inline" onsubmit="return confirm('Drop column <?php echo h($field); ?>?');">
                         <?php echo csrf_field(); ?>
                         <input type="hidden" name="table" value="<?php echo h($table); ?>">
                         <input type="hidden" name="column" value="<?php echo h($field); ?>">
@@ -2033,24 +2364,10 @@ if ($conn) {
                           <i class="fa-solid fa-trash"></i>
                         </button>
                       </form>
-                      <button
-                        type="button"
-                        class="btn btn-sm btn-outline-secondary js-rename-col"
-                        data-table="<?php echo h($table); ?>"
-                        data-field="<?php echo h($field); ?>"
-                        data-type-b64="<?php echo h(b64e($type)); ?>"
-                      >
+                      <button type="button" class="btn btn-sm btn-outline-secondary js-rename-col" data-table="<?php echo h($table); ?>" data-field="<?php echo h($field); ?>" data-type-b64="<?php echo h(b64e($type)); ?>">
                         <i class="fa-solid fa-i-cursor"></i> Rename / raw alter
                       </button>
-                      <button
-                        type="button"
-                        class="btn btn-sm btn-outline-primary js-change-type"
-                        data-table="<?php echo h($table); ?>"
-                        data-field="<?php echo h($field); ?>"
-                        data-type-b64="<?php echo h(b64e($type)); ?>"
-                        data-nullable="<?php echo h($null); ?>"
-                        data-default-b64="<?php echo h(b64e($def)); ?>"
-                      >
+                      <button type="button" class="btn btn-sm btn-outline-primary js-change-type" data-table="<?php echo h($table); ?>" data-field="<?php echo h($field); ?>" data-type-b64="<?php echo h(b64e($type)); ?>" data-nullable="<?php echo h($null); ?>" data-default-b64="<?php echo h(b64e($def)); ?>">
                         <i class="fa-solid fa-font"></i> Change type (UI)
                       </button>
                     </td>
@@ -2063,12 +2380,9 @@ if ($conn) {
       </div>
 
       <div class="card shadow-sm mb-3">
-        <div class="card-header">
-          <strong><i class="fa-solid fa-plus"></i> Add Column</strong>
-        </div>
+        <div class="card-header"><strong><i class="fa-solid fa-plus"></i> Add Column</strong></div>
         <div class="card-body">
-          <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=add_column"
-                class="row g-2" id="addColumnForm" onsubmit="return buildAddColumnType();">
+          <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=add_column" class="row g-2" id="addColumnForm" onsubmit="return buildAddColumnType();">
             <?php echo csrf_field(); ?>
             <input type="hidden" name="table" value="<?php echo h($table); ?>">
             <input type="hidden" name="col_type" id="add_col_type" value="">
@@ -2095,7 +2409,7 @@ if ($conn) {
                     </select>
                   </div>
                   <div class="col-md-4" id="add_length_group">
-                    <input type="text" id="add_length" class="form-control form-control-sm" placeholder="Length / M,D (e.g. 255 or 10,2)">
+                    <input type="text" id="add_length" class="form-control form-control-sm" placeholder="Length / M,D">
                   </div>
                   <div class="col-md-4" id="add_enum_group" style="display:none;">
                     <input type="text" id="add_enum" class="form-control form-control-sm" placeholder="Enum values: one,two,three">
@@ -2122,7 +2436,7 @@ if ($conn) {
                         </select>
                       </div>
                       <div class="col-md-7" id="add_default_value_group" style="display:none;">
-                        <input type="text" id="add_default_value" class="form-control form-control-sm" placeholder="Default value (literal)">
+                        <input type="text" id="add_default_value" class="form-control form-control-sm" placeholder="Default value">
                       </div>
                     </div>
                   </div>
@@ -2140,12 +2454,9 @@ if ($conn) {
       </div>
 
       <div class="card shadow-sm mb-3" id="changeTypeCard" style="display:none;">
-        <div class="card-header">
-          <strong><i class="fa-solid fa-font"></i> Change Column Type</strong>
-        </div>
+        <div class="card-header"><strong><i class="fa-solid fa-font"></i> Change Column Type</strong></div>
         <div class="card-body">
-          <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=change_type"
-                class="row g-2" id="changeTypeForm" onsubmit="return buildChangeTypeColumnType();">
+          <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=change_type" class="row g-2" id="changeTypeForm" onsubmit="return buildChangeTypeColumnType();">
             <?php echo csrf_field(); ?>
             <input type="hidden" name="table" id="changeTypeTable" value="<?php echo h($table); ?>">
             <input type="hidden" name="col_name" id="changeTypeName" value="">
@@ -2173,10 +2484,10 @@ if ($conn) {
                     </select>
                   </div>
                   <div class="col-md-4" id="ct_length_group">
-                    <input type="text" id="ct_length" class="form-control form-control-sm" placeholder="Length / M,D (e.g. 255 or 10,2)">
+                    <input type="text" id="ct_length" class="form-control form-control-sm" placeholder="Length / M,D">
                   </div>
                   <div class="col-md-4" id="ct_enum_group" style="display:none;">
-                    <input type="text" id="ct_enum" class="form-control form-control-sm" placeholder="Enum values: one,two,three">
+                    <input type="text" id="ct_enum" class="form-control form-control-sm" placeholder="Enum values">
                   </div>
                   <div class="col-12 mt-1" id="ct_custom_group" style="display:none;">
                     <input type="text" id="ct_custom_type" class="form-control form-control-sm" placeholder="Full MySQL type definition" />
@@ -2200,13 +2511,13 @@ if ($conn) {
                         </select>
                       </div>
                       <div class="col-md-7" id="ct_default_value_group" style="display:none;">
-                        <input type="text" id="ct_default_value" class="form-control form-control-sm" placeholder="Default value (literal)">
+                        <input type="text" id="ct_default_value" class="form-control form-control-sm" placeholder="Default value">
                       </div>
                     </div>
                   </div>
                 </div>
                 <div class="mt-1">
-                  <small class="text-muted">Tip: for complex definitions (UNSIGNED, ZEROFILL, etc.) use “Custom / raw”.</small>
+                  <small class="text-muted">For complex definitions use “Custom / raw”.</small>
                 </div>
               </div>
             </div>
@@ -2222,9 +2533,7 @@ if ($conn) {
       </div>
 
       <div class="card shadow-sm" id="renameCard" style="display:none;">
-        <div class="card-header">
-          <strong><i class="fa-solid fa-i-cursor"></i> Rename / Raw Alter Column</strong>
-        </div>
+        <div class="card-header"><strong><i class="fa-solid fa-i-cursor"></i> Rename / Raw Alter Column</strong></div>
         <div class="card-body">
           <form method="post" action="<?php echo h($_SERVER['PHP_SELF']); ?>?action=rename_column" class="row g-2">
             <?php echo csrf_field(); ?>
@@ -2259,6 +2568,9 @@ endif; ?>
 </div>
 
 <script>
+var ZB_CSRF = <?php echo json_encode(csrf_token()); ?>;
+var ZB_SAVE_URL = <?php echo json_encode($_SERVER['PHP_SELF'] . '?action=save_config'); ?>;
+
 function toggleAllTables(flag) {
   var boxes = document.querySelectorAll('.export-table-checkbox');
   boxes.forEach(function(b) {
@@ -2322,8 +2634,7 @@ function buildAddColumnType() {
   }
 
   var allowLenTypes = {
-    'CHAR': true, 'VARCHAR': true,
-    'DECIMAL': true, 'FLOAT': true, 'DOUBLE': true,
+    'CHAR': true, 'VARCHAR': true, 'DECIMAL': true, 'FLOAT': true, 'DOUBLE': true,
     'INT': true, 'TINYINT': true, 'SMALLINT': true, 'MEDIUMINT': true, 'BIGINT': true
   };
 
@@ -2336,21 +2647,19 @@ function buildAddColumnType() {
 
   if (base === 'ENUM' || base === 'SET') {
     if (!enumStr) {
-      alert('Please provide values for ' + base + ' (comma separated).');
+      alert('Please provide values for ' + base + '.');
       return false;
     }
     var parts = enumStr.split(',');
     var vals = [];
     parts.forEach(function(p) {
       var v = p.trim();
-      if (!v.length) {
-        return;
-      }
+      if (!v.length) return;
       v = v.replace(/\\/g, "\\\\").replace(/'/g, "''");
       vals.push("'" + v + "'");
     });
     if (!vals.length) {
-      alert('Please provide at least one non-empty value for ' + base + '.');
+      alert('Please provide at least one non-empty value.');
       return false;
     }
     typeDef = base + '(' + vals.join(',') + ')';
@@ -2414,8 +2723,7 @@ function buildChangeTypeColumnType() {
   }
 
   var allowLenTypes = {
-    'CHAR': true, 'VARCHAR': true,
-    'DECIMAL': true, 'FLOAT': true, 'DOUBLE': true,
+    'CHAR': true, 'VARCHAR': true, 'DECIMAL': true, 'FLOAT': true, 'DOUBLE': true,
     'INT': true, 'TINYINT': true, 'SMALLINT': true, 'MEDIUMINT': true, 'BIGINT': true
   };
 
@@ -2428,21 +2736,19 @@ function buildChangeTypeColumnType() {
 
   if (base === 'ENUM' || base === 'SET') {
     if (!enumStr) {
-      alert('Please provide values for ' + base + ' (comma separated).');
+      alert('Please provide values for ' + base + '.');
       return false;
     }
     var parts = enumStr.split(',');
     var vals = [];
     parts.forEach(function(p) {
       var v = p.trim();
-      if (!v.length) {
-        return;
-      }
+      if (!v.length) return;
       v = v.replace(/\\/g, "\\\\").replace(/'/g, "''");
       vals.push("'" + v + "'");
     });
     if (!vals.length) {
-      alert('Please provide at least one non-empty value for ' + base + '.');
+      alert('Please provide at least one non-empty value.');
       return false;
     }
     typeDef = base + '(' + vals.join(',') + ')';
@@ -2469,27 +2775,17 @@ function toggleChangeType(table, field, type, nullable, defVal) {
   var card = document.getElementById('changeTypeCard');
   document.getElementById('changeTypeName').value = field;
   document.getElementById('changeTypeNameDisplay').value = field;
-
   document.getElementById('ct_nullable').checked = (nullable === 'YES');
-
   document.getElementById('ct_default_mode').value = 'none';
   document.getElementById('ct_default_value').value = (defVal || '');
   updateChangeTypeDefaultUI();
-
   document.getElementById('ct_custom_type').value = type;
-
   document.getElementById('ct_type_base').value = 'VARCHAR';
   document.getElementById('ct_length').value = '';
   document.getElementById('ct_enum').value = '';
   updateChangeTypeUI();
-
   card.style.display = 'block';
   card.scrollIntoView({behavior: 'smooth'});
-}
-
-if (document.getElementById('add_type_base')) {
-  updateAddTypeUI();
-  updateAddDefaultUI();
 }
 
 function b64ToUtf8(b64) {
@@ -2508,43 +2804,203 @@ function b64ToUtf8(b64) {
 
 document.addEventListener('click', function(e) {
   var btn = e.target.closest('.js-change-type');
-  if (!btn) {
-    return;
-  }
-
-  var table = btn.dataset.table || '';
-  var field = btn.dataset.field || '';
-  var type = b64ToUtf8(btn.dataset.typeB64 || '');
-  var nullable = btn.dataset.nullable || '';
-  var defVal = b64ToUtf8(btn.dataset.defaultB64 || '');
-
-  toggleChangeType(table, field, type, nullable, defVal);
+  if (!btn) return;
+  toggleChangeType(
+    btn.dataset.table || '',
+    btn.dataset.field || '',
+    b64ToUtf8(btn.dataset.typeB64 || ''),
+    btn.dataset.nullable || '',
+    b64ToUtf8(btn.dataset.defaultB64 || '')
+  );
 });
 
 document.addEventListener('click', function(e) {
   var btn = e.target.closest('.js-rename-col');
-  if (!btn) {
-    return;
-  }
-
-  var table = btn.dataset.table || '';
-  var field = btn.dataset.field || '';
-  var type = b64ToUtf8(btn.dataset.typeB64 || '');
-
-  toggleRename(table, field, type);
+  if (!btn) return;
+  toggleRename(
+    btn.dataset.table || '',
+    btn.dataset.field || '',
+    b64ToUtf8(btn.dataset.typeB64 || '')
+  );
 });
+
+if (document.getElementById('add_type_base')) {
+  updateAddTypeUI();
+  updateAddDefaultUI();
+}
 
 document.addEventListener('change', function(e) {
   var sel = e.target.closest('.js-page-length-select');
-  if (!sel) {
-    return;
-  }
+  if (!sel) return;
   if (sel.value === 'all') {
     if (!confirm('Showing all rows may be very slow and can use a lot of memory. Continue?')) {
       sel.value = '50';
     }
   }
 });
+
+var savedConnectionSelect = document.getElementById('savedConnectionSelect');
+if (savedConnectionSelect) {
+  savedConnectionSelect.addEventListener('change', function() {
+    if (!this.value) return;
+    var p = this.value.split('||');
+    document.getElementById('loginHost').value = p[0] || '';
+    document.getElementById('loginUser').value = p[1] || '';
+    document.getElementById('loginDb').value = p[2] || '';
+    document.getElementById('loginPass').focus();
+  });
+}
+
+function postConfig(section, items, extraData) {
+  var fd = new FormData();
+  fd.append('csrf_token', ZB_CSRF);
+  fd.append('section', section);
+  fd.append('ajax', '1');
+  for (var i = 0; i < items.length; i++) {
+    fd.append('items[]', items[i]);
+  }
+  if (extraData) {
+    Object.keys(extraData).forEach(function(k) {
+      fd.append(k, extraData[k]);
+    });
+  }
+
+  return fetch(ZB_SAVE_URL, {
+    method: 'POST',
+    body: fd,
+    headers: {
+      'X-Requested-With': 'XMLHttpRequest'
+    }
+  }).then(function(r) {
+    return r.json();
+  });
+}
+
+function enableSortableList(container, itemSelector, getSavePayload) {
+  if (!container) return;
+
+  var dragging = null;
+
+  container.querySelectorAll(itemSelector).forEach(function(item) {
+    item.addEventListener('dragstart', function() {
+      dragging = item;
+      item.classList.add('dragging');
+    });
+
+    item.addEventListener('dragend', function() {
+      item.classList.remove('dragging');
+      dragging = null;
+      container.querySelectorAll(itemSelector).forEach(function(el) {
+        el.classList.remove('drop-zone-over');
+      });
+
+      var payload = getSavePayload();
+      postConfig(payload.section, payload.items, payload.extra || {}).then(function(res) {
+        if (!res.ok) {
+          alert(res.error || 'Could not save configuration.');
+        }
+      }).catch(function() {
+        alert('Could not save configuration.');
+      });
+    });
+
+    item.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      if (!dragging || dragging === item) return;
+
+      var rect = item.getBoundingClientRect();
+      var before = e.clientY < rect.top + rect.height / 2;
+      item.classList.add('drop-zone-over');
+
+      if (before) {
+        container.insertBefore(dragging, item);
+      } else {
+        container.insertBefore(dragging, item.nextSibling);
+      }
+    });
+
+    item.addEventListener('dragleave', function() {
+      item.classList.remove('drop-zone-over');
+    });
+
+    item.addEventListener('drop', function() {
+      item.classList.remove('drop-zone-over');
+    });
+  });
+}
+
+function enableSortableColumns(rowEl) {
+  if (!rowEl) return;
+
+  var dragging = null;
+  var selectors = '.sortable-col';
+
+  rowEl.querySelectorAll(selectors).forEach(function(th) {
+    th.addEventListener('dragstart', function() {
+      dragging = th;
+      th.classList.add('dragging');
+    });
+
+    th.addEventListener('dragend', function() {
+      th.classList.remove('dragging');
+      dragging = null;
+      rowEl.querySelectorAll(selectors).forEach(function(el) {
+        el.classList.remove('drop-zone-over');
+      });
+
+      var items = Array.prototype.map.call(rowEl.querySelectorAll(selectors), function(el) {
+        return el.getAttribute('data-column');
+      });
+
+      postConfig('column_order', items, { table: rowEl.getAttribute('data-table') }).then(function(res) {
+        if (res.ok) {
+          window.location.reload();
+        } else {
+          alert(res.error || 'Could not save column order.');
+        }
+      }).catch(function() {
+        alert('Could not save column order.');
+      });
+    });
+
+    th.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      if (!dragging || dragging === th) return;
+
+      var rect = th.getBoundingClientRect();
+      var before = e.clientX < rect.left + rect.width / 2;
+      th.classList.add('drop-zone-over');
+
+      if (before) {
+        rowEl.insertBefore(dragging, th);
+      } else {
+        rowEl.insertBefore(dragging, th.nextSibling);
+      }
+    });
+
+    th.addEventListener('dragleave', function() {
+      th.classList.remove('drop-zone-over');
+    });
+
+    th.addEventListener('drop', function() {
+      th.classList.remove('drop-zone-over');
+    });
+  });
+}
+
+var tableList = document.querySelector('.sortable-table-list');
+if (tableList) {
+  enableSortableList(tableList, '.sortable-row', function() {
+    return {
+      section: 'table_order',
+      items: Array.prototype.map.call(tableList.querySelectorAll('.sortable-row'), function(el) {
+        return el.getAttribute('data-item');
+      })
+    };
+  });
+}
+
+enableSortableColumns(document.getElementById('browseColumnsRow'));
 </script>
 
 </body>
